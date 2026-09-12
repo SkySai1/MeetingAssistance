@@ -14,6 +14,15 @@ enum GUIValidation {
         guard !started, let flag = arguments.firstIndex(of: "--validate-gui"), arguments.indices.contains(flag + 1) else { return }
         started = true
         let directory = URL(fileURLWithPath: arguments[flag + 1], isDirectory: true)
+        let originalAI = model.aiSettings.configuration
+        let originalEnabled = model.aiSettings.enabled
+        defer { model.aiSettings.configuration = originalAI; model.aiSettings.enabled = originalEnabled }
+        let aiModel = arguments.firstIndex(of: "--validate-ollama-model").flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
+        model.aiSettings.enabled = aiModel != nil
+        if let aiModel { model.aiSettings.configuration.model = aiModel }
+        if let server = arguments.firstIndex(of: "--validate-ollama-server"), arguments.indices.contains(server + 1) {
+            model.aiSettings.configuration.server = arguments[server + 1]
+        }
         var report: [String: Any] = [:]
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -63,6 +72,28 @@ enum GUIValidation {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             try encoder.encode(events).write(to: directory.appendingPathComponent("transcript.json"))
+            if aiModel != nil {
+                try encoder.encode(model.aiState).write(to: directory.appendingPathComponent("ai-state.json"))
+                try model.aiState.protocolText.write(to: directory.appendingPathComponent("protocol.md"), atomically: true, encoding: .utf8)
+                try require(model.aiState.protocolComplete && model.aiState.processedEvents == events.count, "AI did not include every finalized event")
+                try require(model.aiState.releaseStatus == .unloaded, model.aiState.error ?? "Model unloading was not confirmed")
+                let pasteboard = NSPasteboard.general
+                let saved = (pasteboard.pasteboardItems ?? []).map { item in
+                    item.types.compactMap { type in item.data(forType: type).map { (type, $0) } }
+                }
+                defer {
+                    pasteboard.clearContents()
+                    pasteboard.writeObjects(saved.map { values in
+                        let item = NSPasteboardItem()
+                        for (type, data) in values { item.setData(data, forType: type) }
+                        return item
+                    })
+                }
+                model.copyProtocol()
+                try require(pasteboard.string(forType: .string) == model.aiState.protocolText, "Copy did not deliver the complete protocol")
+                report["ai_protocol_and_copy"] = "passed"
+                report["model_unloaded"] = true
+            }
             try model.diagnostics.joined(separator: "\n").write(to: directory.appendingPathComponent("diagnostics.log"), atomically: true, encoding: .utf8)
             report["events_before_stop"] = beforeStop
             report["events_after_drain"] = events.count

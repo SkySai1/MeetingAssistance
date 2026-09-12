@@ -18,6 +18,8 @@ def main():
     parser.add_argument("--microphone-playback-device", help="Optional physical output for an acoustic microphone test")
     parser.add_argument("--output", default=".build/validation/latest")
     parser.add_argument("--debug-audio", action="store_true")
+    parser.add_argument("--ollama-model", help="Enable real AI validation with this model")
+    parser.add_argument("--ollama-server", default="http://127.0.0.1:11434")
     args = parser.parse_args()
     if args.duration <= 0:
         parser.error("duration must be positive")
@@ -25,11 +27,16 @@ def main():
     os.chdir(root)
     destination = Path(args.output)
     destination.mkdir(parents=True, exist_ok=True)
-    command = ["swift", "run", "-c", "release", "--skip-build", "MeetingAssistant", "--duration", str(args.duration), "--json"]
+    # Use the already-built binary so a long live check does not hold SwiftPM's
+    # build lock while independent unit tests or GUI packaging are running.
+    command = [str(root / ".build/release/MeetingAssistant"), "--duration", str(args.duration), "--json"]
     if args.mode == "remote":
         command.append("--remote-only")
     if args.debug_audio:
         command += ["--debug-audio-dir", str(destination / "audio")]
+    if args.ollama_model:
+        command += ["--ollama-model", args.ollama_model, "--ollama-server", args.ollama_server,
+                    "--ai-output", str(destination / "ai-state.json")]
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
     selector = selectors.DefaultSelector()
     for stream, kind in [(process.stdout, "events"), (process.stderr, "diagnostics")]:
@@ -85,6 +92,7 @@ def main():
                 if remote is None or remote.poll() is not None:
                     if remote is not None and remote.returncode != 0:
                         errors.append(f"Remote playback failed: {remote.returncode}")
+                        process.send_signal(signal.SIGINT)
                         break
                     if remote is not None:
                         speech_cycle_ends.append(time.monotonic() - capture_began)
@@ -93,6 +101,7 @@ def main():
                 if args.mode == "dual" and args.microphone_playback_device and time.monotonic() >= next_you and (you is None or you.poll() is not None):
                     if you is not None and you.returncode != 0:
                         errors.append(f"Microphone test playback failed: {you.returncode}")
+                        process.send_signal(signal.SIGINT)
                         break
                     playback["you"] = subprocess.Popen(["say", f"--audio-device={args.microphone_playback_device}", "-v", "Milena", "-r", "165",
                         "Проверка локального микрофона. Я подготовлю документ к четвергу. Уточните, пожалуйста, время следующей встречи."])
@@ -105,7 +114,9 @@ def main():
                 level = next((line for line in reversed(diagnostics) if "RSS" in line), "Model loading...")
                 print(f"Progress: {len(events)} events | {level}", flush=True)
                 last_report = now
-        process.wait(timeout=90)
+        # An aborted playback test still drains the child's pipes, otherwise its
+        # final ASR/AI output could fill a pipe and block orderly shutdown.
+        process.communicate(timeout=240)
     finally:
         for player in playback.values():
             if player is not None and player.poll() is None:
@@ -180,6 +191,15 @@ def main():
         "first_cycle_ordered_word_precision": cycle_scores[0]["precision"] if cycle_scores else None,
         "full_speech_cycles": cycle_scores,
         "acoustic_microphone_playback": args.microphone_playback_device, "errors": errors}
+    if args.ollama_model:
+        try:
+            ai = json.loads((destination / "ai-state.json").read_text())
+            report["ai"] = {key: ai.get(key) for key in ["phase", "processedEvents", "totalEvents", "updates", "protocolComplete", "releaseStatus", "error"]}
+            if not ai["protocolComplete"] or ai["processedEvents"] != len(events) or ai["releaseStatus"] != "unloaded":
+                errors.append("AI did not process all events, deliver a full protocol, and confirm model unloading")
+            (destination / "protocol.md").write_text(ai["protocolText"] + "\n")
+        except (OSError, ValueError, KeyError) as error:
+            errors.append(f"AI validation output unavailable: {error}")
     (destination / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
     return 1 if errors else 0

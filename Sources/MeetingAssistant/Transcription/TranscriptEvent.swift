@@ -1,10 +1,27 @@
 import Foundation
 
-public struct TranscriptEvent: Codable, Sendable, Equatable {
+public struct TranscriptEvent: Codable, Sendable, Equatable, Identifiable {
+    public let id: String
     public let source: AudioSource
     public let startTime: Double
     public let endTime: Double
     public let text: String
+
+    public init(id: String = UUID().uuidString, source: AudioSource, startTime: Double, endTime: Double, text: String) {
+        self.id = id; self.source = source
+        self.startTime = startTime; self.endTime = endTime; self.text = text
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, source, startTime, endTime, text }
+
+    public init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decodeIfPresent(String.self, forKey: .id) ?? UUID().uuidString
+        source = try values.decode(AudioSource.self, forKey: .source)
+        startTime = try values.decode(Double.self, forKey: .startTime)
+        endTime = try values.decode(Double.self, forKey: .endTime)
+        text = try values.decode(String.self, forKey: .text)
+    }
 }
 
 // A source frontier is the earliest time at which it can still produce an event.

@@ -13,6 +13,9 @@ struct Options: Sendable {
     var thresholdDB = -42.0
     var json = false
     var debugAudioDirectory: String?
+    var ai = AIConfiguration()
+    var aiEnabled = false
+    var aiOutput: String?
 
     init(arguments: [String]) throws {
         var index = 0
@@ -31,6 +34,13 @@ struct Options: Sendable {
             case "--tokenizer-path": tokenizerPath = try value()
             case "--json": json = true
             case "--debug-audio-dir": debugAudioDirectory = try value()
+            case "--ollama-server": ai.server = try value()
+            case "--ollama-model": ai.model = try value(); aiEnabled = true
+            case "--ai-output": aiOutput = try value()
+            case "--system-prompt-file": ai.systemPrompt = try String(contentsOfFile: value(), encoding: .utf8)
+            case "--context-interval":
+                guard let interval = Double(try value()), interval.isFinite, (2...120).contains(interval) else { throw MeetingError("--context-interval must be 2...120 seconds") }
+                ai.updateInterval = interval
             case "--speech-threshold":
                 guard let db = Double(try value()), db.isFinite, (-90 ... -5).contains(db) else { throw MeetingError("--speech-threshold must be between -90 and -5 dBFS") }
                 thresholdDB = db
@@ -56,6 +66,11 @@ struct Options: Sendable {
       --speech-threshold DB     Speech gate in dBFS (default: -42)
       --json                    Emit finalized events as JSON Lines on stdout
       --debug-audio-dir PATH     Explicitly save ASR input WAVs and raw result JSON locally
+      --ollama-server URL        AI server (default: http://127.0.0.1:11434)
+      --ollama-model NAME        Enable AI with this explicitly selected model
+      --system-prompt-file PATH  UTF-8 system prompt for context and protocol
+      --context-interval SEC    Coalesce finalized phrases (2...120, default: 10)
+      --ai-output PATH          Write latest AI state as JSON, including final protocol
       --duration SECONDS        Stop automatically after this capture duration
       --microphone NAME         Exact microphone device name
       --remote-device NAME      Exact remote input name (default: BlackHole 2ch)
@@ -79,6 +94,7 @@ extension Options {
         configuration.tokenizerPath = tokenizerPath
         configuration.thresholdDB = thresholdDB
         configuration.debugAudioDirectory = debugAudioDirectory
+        configuration.ai = aiEnabled ? ai : nil
         return configuration
     }
 }

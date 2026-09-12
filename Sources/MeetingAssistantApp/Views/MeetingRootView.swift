@@ -2,12 +2,13 @@ import MeetingAssistantCore
 import SwiftUI
 
 private enum Screen: String, CaseIterable, Identifiable {
-    case home = "Подготовка", audio = "Настройки аудио", meeting = "Встреча"
+    case home = "Подготовка", audio = "Настройки аудио", ai = "Настройки AI", meeting = "Встреча"
     var id: Self { self }
     var icon: String {
         switch self {
         case .home: "checkmark.circle"
         case .audio: "waveform"
+        case .ai: "sparkles"
         case .meeting: "text.bubble"
         }
     }
@@ -26,7 +27,7 @@ struct MeetingRootView: View {
             .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
             .safeAreaInset(edge: .bottom) {
                 VStack(alignment: .leading, spacing: 6) {
-                    Label("Обработка на Mac", systemImage: "lock.shield")
+                    Label("Аудио на этом Mac", systemImage: "lock.shield")
                     Text("Без облачной транскрипции").font(.caption).foregroundStyle(.secondary)
                 }
                 .padding()
@@ -49,6 +50,7 @@ struct MeetingRootView: View {
                 switch screen ?? .home {
                 case .home: home
                 case .audio: audioSettings
+                case .ai: AISettingsView(settings: model.aiSettings, meetingActive: model.isBusy)
                 case .meeting: liveMeeting
                 }
             }
@@ -70,6 +72,7 @@ struct MeetingRootView: View {
         } message: {
             Text("Текст текущей встречи хранится только в этом окне и будет очищен. При необходимости сначала скопируйте его.")
         }
+        .task { await model.aiSettings.refresh() }
         .onChange(of: model.hasMeeting) { _, hasMeeting in if hasMeeting { screen = .meeting } }
     }
 
@@ -93,6 +96,8 @@ struct MeetingRootView: View {
                         readiness("Собеседники · REMOTE", detail: model.deviceName(.remote), ready: model.remoteID != nil)
                         Divider()
                         readiness("Распознавание речи", detail: model.modelReady ? "Локальная модель найдена · русский язык" : "Нужна локальная модель", ready: model.modelReady)
+                        Divider()
+                        AIReadinessView(settings: model.aiSettings)
                     }.padding(12)
                 }
                 if !model.inputsReady {
@@ -100,7 +105,8 @@ struct MeetingRootView: View {
                         .foregroundStyle(.orange)
                 }
                 HStack {
-                    Button("Настроить и проверить звук") { screen = .audio }
+                    Button("Настроить звук") { screen = .audio }
+                    Button("Настроить AI") { screen = .ai }
                     Spacer()
                     Button(model.hasMeeting ? "Новая встреча" : "Начать встречу", systemImage: "record.circle") { startMeeting() }
                         .buttonStyle(.borderedProminent).controlSize(.large).disabled(!model.canStart)
@@ -193,32 +199,10 @@ struct MeetingRootView: View {
                 Button("Скопировать", systemImage: "doc.on.doc") { model.copyTranscript() }.disabled(model.transcript.isEmpty)
             }.padding(20)
             Divider()
-            if model.transcript.isEmpty {
-                ContentUnavailableView {
-                    Label(model.isBusy ? "Слушаем встречу" : "Здесь будет транскрипт", systemImage: "waveform")
-                } description: {
-                    Text(model.isBusy ? "Подтверждённые фразы появляются после небольшой паузы в речи." : "Начните встречу, чтобы увидеть текст с временными метками.")
-                }.frame(maxHeight: .infinity)
-            } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 18) {
-                            ForEach(Array(model.transcript.enumerated()), id: \.offset) { index, event in
-                                VStack(alignment: .leading, spacing: 6) {
-                                    HStack {
-                                        Text(event.source == .you ? "YOU · Вы" : "REMOTE · Собеседники")
-                                            .font(.caption.bold()).foregroundStyle(event.source == .you ? .blue : .teal)
-                                        Text(MeetingViewModel.timestamp(event.startTime)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                                    }
-                                    Text(event.text).font(.body).textSelection(.enabled)
-                                }.frame(maxWidth: .infinity, alignment: .leading).id(index)
-                            }
-                        }.padding(24)
-                    }
-                    .defaultScrollAnchor(.bottom)
-                    .onChange(of: model.transcript.count) { _, count in
-                        if count > 0 { proxy.scrollTo(count - 1, anchor: .bottom) }
-                    }
+            HSplitView {
+                transcriptPane.frame(minWidth: 320)
+                if model.aiWasEnabled {
+                    AIContextView(model: model).frame(minWidth: 300, idealWidth: 400, maxWidth: 520)
                 }
             }
             Divider()
@@ -236,5 +220,39 @@ struct MeetingRootView: View {
                 }.font(.caption).foregroundStyle(.secondary)
             }.padding(16)
         }
+    }
+    @ViewBuilder
+    private var transcriptPane: some View {
+            if model.transcript.isEmpty {
+                ContentUnavailableView {
+                    Label(model.isBusy ? "Слушаем встречу" : "Здесь будет транскрипт", systemImage: "waveform")
+                } description: {
+                    Text(model.isBusy ? "Подтверждённые фразы появляются после небольшой паузы в речи." : "Начните встречу, чтобы увидеть текст с временными метками.")
+                }.frame(maxHeight: .infinity)
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 18) {
+                            ForEach(model.transcript) { event in
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack {
+                                        Text(event.source == .you ? "YOU · Вы" : "REMOTE · Собеседники")
+                                            .font(.caption.bold()).foregroundStyle(event.source == .you ? .blue : .teal)
+                                        Text(MeetingViewModel.timestamp(event.startTime)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                                    }
+                                    Text(event.text).font(.body).textSelection(.enabled)
+                                }.frame(maxWidth: .infinity, alignment: .leading).id(event.id)
+                            }
+                        }.padding(24)
+                    }
+                    .defaultScrollAnchor(.bottom)
+                    .onChange(of: model.focusedEventID) { _, id in
+                        if let id { proxy.scrollTo(id, anchor: .center) }
+                    }
+                    .onChange(of: model.transcript.count) { _, count in
+                        if let last = model.transcript.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                    }
+                }
+            }
     }
 }

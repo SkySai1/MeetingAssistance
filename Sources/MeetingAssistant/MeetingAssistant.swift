@@ -37,6 +37,18 @@ struct MeetingAssistant {
                         data = try encoder.encode(event) + Data([10])
                     } else { data = Data((event.terminalLine + "\n").utf8) }
                     try FileHandle.standardOutput.write(contentsOf: data)
+                },
+                analysis: { state in
+                    if let path = options.aiOutput {
+                        do {
+                            let encoder = JSONEncoder()
+                            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                            try encoder.encode(state).write(to: URL(fileURLWithPath: path), options: .atomic)
+                        } catch { Log.info("AI output could not be saved: \(error)") }
+                    }
+                    if [.completed, .cancelled].contains(state.phase) {
+                        Log.info("AI \(state.phase.rawValue): \(state.processedEvents)/\(state.totalEvents) events; model \(state.releaseStatus.rawValue)")
+                    }
                 }
             ))
             let stop = StopSignal()

@@ -19,6 +19,26 @@
             "target": "MeetingAssistant",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release MeetingAssistant"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:MeetingAssistant}",
+            "name": "Debug MeetingAssistantApp",
+            "target": "MeetingAssistantApp",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug MeetingAssistantApp"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:MeetingAssistant}",
+            "name": "Release MeetingAssistantApp",
+            "target": "MeetingAssistantApp",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release MeetingAssistantApp"
         }
     ]
 }

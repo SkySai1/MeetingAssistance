@@ -9,13 +9,17 @@ public final class MeetingSession: Sendable {
     private let started = Atomic<Bool>(false)
     private let stopRequested = Atomic<Bool>(false)
     private let stoppingPublished = Atomic<Bool>(false)
+    private let analysis: ContextEngine?
 
     public init(configuration: MeetingConfiguration, callbacks: MeetingCallbacks = MeetingCallbacks()) {
         self.configuration = configuration
         self.callbacks = callbacks
+        analysis = configuration.captureOnly ? nil : configuration.ai.map { ContextEngine(configuration: $0, output: callbacks.analysis) }
     }
 
     public func requestStop() { stopRequested.store(true, ordering: .releasing) }
+    public func cancelAnalysis() { if let analysis { Task { await analysis.cancel() } } }
+    public func retryAnalysis() { if let analysis { Task { await analysis.retry() } } }
 
     public func run() async throws {
         guard !started.exchange(true, ordering: .acquiringAndReleasing) else {
@@ -25,7 +29,21 @@ public final class MeetingSession: Sendable {
             do {
                 callbacks.phase(.preparing)
                 try configuration.validate()
-                if !stopRequested.load(ordering: .acquiring) { try await runSession() }
+                if !stopRequested.load(ordering: .acquiring) {
+                    let analysisTask = analysis.map { engine in Task { await engine.run() } }
+                    try await withTaskCancellationHandler {
+                        do {
+                            try await runSession()
+                        } catch {
+                            analysis?.journal.close()
+                            await analysisTask?.value
+                            throw error
+                        }
+                        analysis?.journal.close()
+                        if analysisTask != nil { callbacks.phase(.finishingAnalysis) }
+                        await analysisTask?.value
+                    } onCancel: { self.cancelAnalysis() }
+                }
                 callbacks.phase(.stopped)
             } catch {
                 callbacks.phase(.failed(String(describing: error)))
@@ -42,7 +60,10 @@ public final class MeetingSession: Sendable {
 
     private func runSession() async throws {
         let sources = configuration.sources
-        let timeline = TranscriptTimeline(sources: sources, output: callbacks.transcript)
+        let timeline = TranscriptTimeline(sources: sources) { [callbacks, analysis] event in
+            try callbacks.transcript(event)
+            analysis?.journal.append(event)
+        }
         var transcribers: [AudioSource: WhisperTranscriber] = [:]
         var pipelines: [AudioSource: StreamPipeline] = [:]
         if !configuration.captureOnly {

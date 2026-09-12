@@ -64,6 +64,10 @@ final class MeetingViewModel: ObservableObject {
     @Published private(set) var diagnostics: [String] = []
     @Published private(set) var errorMessage: String?
     @Published private(set) var errorDetails = ""
+    @Published private(set) var aiState = AIState()
+    @Published private(set) var aiWasEnabled = false
+    @Published var focusedEventID: String?
+    let aiSettings: AISettingsViewModel
 
     private let preferences: UserDefaults
     private var session: MeetingSession?
@@ -73,6 +77,7 @@ final class MeetingViewModel: ObservableObject {
 
     init(preferences: UserDefaults = .standard) {
         self.preferences = preferences
+        aiSettings = AISettingsViewModel(preferences: preferences)
         modelPath = preferences.string(forKey: "modelPath") ?? ""
         tokenizerPath = preferences.string(forKey: "tokenizerPath") ?? ""
         refresh()
@@ -80,9 +85,12 @@ final class MeetingViewModel: ObservableObject {
 
     var canStart: Bool { !isBusy && inputsReady && modelReady }
     var inputsReady: Bool { microphoneID != nil && remoteID != nil && microphoneID != remoteID }
-    var canStop: Bool { isBusy && !stopPending }
+    var canStop: Bool { isBusy && !stopPending && phase != .finishingAnalysis }
 
     var statusText: String {
+        if phase == .finishingAnalysis {
+            return aiState.phase == .unloading ? "Освобождаем модель…" : "Готовим протокол встречи…"
+        }
         if stopPending { return "Завершаем обработку фраз…" }
         switch phase {
         case .idle: return "Готовы к встрече"
@@ -90,6 +98,7 @@ final class MeetingViewModel: ObservableObject {
         case .loadingModels: return "Загружаем модель распознавания…"
         case .running: return isAudioTest ? "Проверка звука" : "Встреча идёт"
         case .stopping: return "Завершаем обработку фраз…"
+        case .finishingAnalysis: return "Готовим протокол встречи…"
         case .stopped: return isAudioTest ? "Проверка завершена" : "Встреча завершена"
         case .failed: return "Не удалось завершить сессию"
         }
@@ -146,13 +155,17 @@ final class MeetingViewModel: ObservableObject {
         isBusy = true; isAudioTest = audioTest; stopPending = false
         phase = .preparing; lastActivePhase = .preparing; errorMessage = nil; errorDetails = ""
         metrics = [:]; diagnostics = []
-        if !audioTest { transcript = []; elapsed = 0; hasMeeting = true }
+        let ai = !audioTest && aiSettings.enabled ? aiSettings.configuration : nil
+        if !audioTest {
+            transcript = []; elapsed = 0; hasMeeting = true
+            aiWasEnabled = ai != nil; aiState = AIState(); focusedEventID = nil
+        }
         // Mark busy before permission/model loading so repeated clicks cannot start
         // overlapping sessions. Stop is also valid while permission is pending.
-        runTask = Task { await performRun(audioTest: audioTest) }
+        runTask = Task { await performRun(audioTest: audioTest, ai: ai) }
     }
 
-    private func performRun(audioTest: Bool) async {
+    private func performRun(audioTest: Bool, ai: AIConfiguration?) async {
         defer {
             session = nil; runTask = nil; isBusy = false; stopPending = false
             metrics = [:]
@@ -180,8 +193,11 @@ final class MeetingViewModel: ObservableObject {
             configuration.captureOnly = audioTest
             configuration.modelPath = modelPath.isEmpty ? nil : modelPath
             configuration.tokenizerPath = tokenizerPath.isEmpty ? nil : tokenizerPath
+            configuration.ai = ai
             let mailbox = SessionMailbox()
-            let session = MeetingSession(configuration: configuration, callbacks: mailbox.callbacks)
+            var callbacks = mailbox.callbacks
+            callbacks.analysis = { [weak self] state in await self?.receiveAnalysis(state) }
+            let session = MeetingSession(configuration: configuration, callbacks: callbacks)
             self.session = session
             let pump = Task {
                 while !Task.isCancelled {
@@ -244,6 +260,17 @@ final class MeetingViewModel: ObservableObject {
     func stopAndWait() async {
         stop()
         await runTask?.value
+    }
+
+    private func receiveAnalysis(_ state: AIState) { aiState = state }
+
+    func cancelAnalysis() { session?.cancelAnalysis() }
+    func retryAnalysis() { session?.retryAnalysis() }
+
+    func copyProtocol() {
+        guard aiState.protocolComplete else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(aiState.protocolText, forType: .string)
     }
 
     func copyTranscript() {

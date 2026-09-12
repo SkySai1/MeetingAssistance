@@ -1,7 +1,7 @@
 import Foundation
 
 public enum MeetingPhase: Sendable, Equatable {
-    case idle, preparing, loadingModels, running, stopping, stopped
+    case idle, preparing, loadingModels, running, stopping, finishingAnalysis, stopped
     case failed(String)
 }
 
@@ -19,15 +19,18 @@ public struct MeetingCallbacks: Sendable {
     public var metrics: @Sendable (AudioMetrics) -> Void
     public var diagnostic: @Sendable (String) -> Void
     public var transcript: @Sendable (TranscriptEvent) throws -> Void
+    public var analysis: @Sendable (AIState) async -> Void
 
     public init(
         phase: @escaping @Sendable (MeetingPhase) -> Void = { _ in },
         metrics: @escaping @Sendable (AudioMetrics) -> Void = { _ in },
         diagnostic: @escaping @Sendable (String) -> Void = { _ in },
-        transcript: @escaping @Sendable (TranscriptEvent) throws -> Void = { _ in }
+        transcript: @escaping @Sendable (TranscriptEvent) throws -> Void = { _ in },
+        analysis: @escaping @Sendable (AIState) async -> Void = { _ in }
     ) {
         self.phase = phase; self.metrics = metrics
         self.diagnostic = diagnostic; self.transcript = transcript
+        self.analysis = analysis
     }
 }
 
@@ -40,6 +43,7 @@ public struct MeetingConfiguration: Sendable {
     public var tokenizerPath: String?
     public var thresholdDB = -42.0
     public var debugAudioDirectory: String?
+    public var ai: AIConfiguration?
 
     public init(selected: [AudioSource: AudioDevice]) { self.selected = selected }
 

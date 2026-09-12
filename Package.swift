@@ -23,13 +23,13 @@ let package = Package(
             dependencies: [.product(name: "WhisperKit", package: "argmax-oss-swift")],
             path: "Sources/MeetingAssistant",
             exclude: ["CLI.swift", "MeetingAssistant.swift"],
-            sources: ["Audio", "Meeting", "Transcription"]
+            sources: ["Audio", "Meeting", "Transcription", "Context"]
         ),
         .executableTarget(
             name: "MeetingAssistant",
             dependencies: ["MeetingAssistantCore"],
             path: "Sources/MeetingAssistant",
-            exclude: ["Audio", "Meeting", "Transcription"],
+            exclude: ["Audio", "Meeting", "Transcription", "Context"],
             sources: ["CLI.swift", "MeetingAssistant.swift"]
         ),
         .executableTarget(
