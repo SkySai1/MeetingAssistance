@@ -13,7 +13,7 @@ The final product is a native macOS application that:
 5. Diarizes the remote stream.
 6. Identifies known speakers using stored voice profiles.
 7. Maintains a timestamped transcript.
-8. Feeds finalized transcript events into a local LLM through Ollama.
+8. Feeds finalized transcript events into a model on the user-configured Ollama server.
 9. Maintains a live contextual briefing.
 10. Presents all major controls and results through a native SwiftUI graphical interface.
 11. Works locally without requiring cloud transcription.
@@ -63,9 +63,13 @@ The application should expose only understandable configuration and status.
 
 Do NOT implement the complete system immediately.
 
-The current milestone is:
+Phases 1–6 and the basic Phase 7 GUI have been completed. The 30-minute dual-ASR stability test was accepted; implementation baseline is commit `22b55e0`.
 
-> Capture two live audio sources simultaneously and produce stable real-time WhisperKit transcription for both.
+The next milestone, reordered by the user on 2026-09-12, is:
+
+> Configurable Ollama server and model selection, an editable system prompt, streaming meeting context that retains earlier events, a final meeting protocol displayed for copying, and API-driven model unloading after delivery.
+
+Implement this as Phase 8 before diarization, voice profiles, and SQLite. See [OLLAMA_PLAN.md](OLLAMA_PLAN.md) for the implementation sequence and acceptance criteria. This is planned work, not functionality already present in the baseline.
 
 The two sources are:
 
@@ -74,7 +78,7 @@ REMOTE = BlackHole 2ch
 YOU    = physical MacBook microphone
 ```
 
-Expected CLI output during the current milestone:
+Preserve the existing dual-stream transcription and CLI output:
 
 ```text
 [00:03.420] REMOTE: Добрый день, коллеги.
@@ -606,7 +610,7 @@ A transcript event should conceptually contain:
 
 # Ollama integration
 
-Ollama is a later analysis layer.
+Ollama is the next analysis layer (Phase 8), before diarization and persistent meeting storage.
 
 It must NOT receive raw audio.
 
@@ -615,18 +619,26 @@ Pipeline:
 ```text
 audio
   ↓
-WhisperKit / FluidAudio
+WhisperKit (YOU + REMOTE; diarization is optional in a later phase)
   ↓
 TranscriptEvent
   ↓
-Ollama / Qwen
+User-selected Ollama model
 ```
 
-Communication should happen locally through:
+The server base URL must be configurable in native application settings. Default:
 
 ```text
 http://127.0.0.1:11434
 ```
+
+Support the user's HTTP(S) Ollama server, including a server on another machine. Display where AI processing happens. Audio stays on the Mac; only finalized text and its context are sent to the selected server.
+
+Fetch the available model list from the configured server automatically and let the user choose. Provide refresh and connection status. Do not silently substitute a missing model or download models automatically.
+
+Provide an editable, persisted system prompt with a default and reset action. Use it for both live context and the final protocol. Freeze server, model, and prompt for each meeting; changes apply to the next meeting.
+
+Use verified public APIs: `GET /api/tags`, streaming `POST /api/chat`, `POST /api/generate` with `keep_alive: 0` to unload, and `GET /api/ps` to verify. API references and edge cases are documented in [OLLAMA_PLAN.md](OLLAMA_PLAN.md).
 
 The application must remain useful when Ollama is unavailable.
 
@@ -646,7 +658,7 @@ Ollama failure must never stop audio capture or transcription.
 
 Do not resend the full transcript to the LLM every time.
 
-Use incremental structured state:
+The application owns the conversation history; keeping a model loaded does not keep a meeting history for subsequent requests. Use incremental structured state with stable source event IDs, retained earlier facts/decisions/actions, a bounded recent excerpt, and all new finalized events:
 
 ```text
 previous state
@@ -668,11 +680,11 @@ Desired structure:
 }
 ```
 
-Typical update interval:
+Schedule updates when finalized events arrive, coalescing them into small batches. An initial proposed interval is 10 seconds, configurable and adapted to generation speed. Skip empty updates and allow only one context request in flight per meeting.
 
-```text
-30–60 seconds
-```
+Stream the generated response to the GUI. Distinguish an in-progress draft from the last validated context. Commit state and advance the processed-event cursor only after a complete, valid response. Preserve unprocessed events on errors; never silently lose earlier decisions when shortening context.
+
+Bound queues and context size. Retain a session event journal before SQLite exists; use chunked processing when a meeting exceeds the model's context budget. AI overload may pause analysis with a clear status, but must not stop or block ASR.
 
 Do not invoke the LLM for every token or partial ASR result.
 
@@ -870,12 +882,14 @@ Must show:
 
 ```text
 Ollama status
+server URL
 selected model
 connection status
 context update interval
+editable system prompt
 ```
 
-Allow selecting an available local model.
+Automatically retrieve the model list from the configured server and allow selection. Persist settings; provide connection/model refresh and resetting the system prompt. Show model unloading status after a meeting.
 
 Do not require Ollama for transcription.
 
@@ -938,7 +952,7 @@ When the user clicks Start Meeting:
 5. Start both capture pipelines.
 6. Start live transcription.
 7. If diarization is enabled, start it for REMOTE.
-8. If Ollama is available, start context updates.
+8. If AI is enabled and Ollama is available, start context updates using the meeting's settings snapshot.
 9. Transition UI to Live Meeting.
 
 Do not silently start with a missing critical audio source.
@@ -951,11 +965,19 @@ When the user clicks Stop Meeting:
 
 1. stop audio capture;
 2. flush pending finalized ASR;
-3. finalize diarization;
-4. persist remaining transcript events;
-5. optionally request final context/summary from Ollama;
-6. close meeting session cleanly;
-7. show saved meeting result.
+3. finalize diarization when that later feature is enabled;
+4. retain the remaining events in the session journal (persist them once storage exists);
+5. stop scheduling live context updates and include all remaining events in final analysis;
+6. when AI is enabled, generate a meeting protocol that accounts for earlier events and the final ASR tail;
+7. receive the complete protocol, display it, and enable copying in the app;
+8. request unloading of the meeting's model through the same Ollama server API, then verify the result;
+9. close the session cleanly and keep the available transcript/protocol visible.
+
+Protocol delivery means display inside the app with copying, as clarified by the user; no external messaging is part of this milestone. Unload after full delivery, without waiting for a copy-button click.
+
+Use the API to release the selected model; let Ollama close its runner. Do not terminate the `ollama-server` service or run remote process-killing commands. A shared server may have other requests using that model, so handle delayed or unconfirmed unloading explicitly. Do not let cleanup from an old meeting unload a newer meeting's model.
+
+After cancellation or AI errors, attempt bounded cleanup as well. A failed unload must not remove the generated protocol. Finalization, cancellation, window closing, and retries must have bounded waits and clear status.
 
 ---
 
@@ -1033,14 +1055,15 @@ for debugging.
 
 # Privacy UI
 
-The application is designed for local processing.
+Audio capture and transcription remain local. AI may run on the user-configured Ollama server, including another machine.
 
 The UI should make this visible.
 
 Example:
 
 ```text
-Processing: Local
+Audio processing: This Mac
+AI processing: Selected Ollama server
 Cloud transcription: Off
 ```
 
@@ -1253,7 +1276,33 @@ Acceptance criteria:
 
 ---
 
-## Phase 8 — FluidAudio diarization
+## Phase 8 — Ollama context, final protocol, and model lifecycle
+
+This is the next milestone after the accepted basic GUI. Detailed plan: [OLLAMA_PLAN.md](OLLAMA_PLAN.md).
+
+Implement incrementally within this milestone:
+
+1. Configurable server URL, automatic model discovery/selection, connection status, and editable persisted system prompt.
+2. Stable event IDs and an in-memory event journal; context that retains earlier facts, decisions, questions, and actions.
+3. Bounded sequential context requests and streaming updates displayed beside the transcript.
+4. A final protocol after Stop that includes all finalized events, displayed in the app with copying.
+5. Model unloading through the API after delivery, verification, and cleanup on errors/cancellation.
+6. Live validation of dual-ASR plus AI, early-context retention, final ASR draining, restart, and unloading.
+
+Acceptance criteria:
+
+- user can configure their Ollama server and choose a model obtained from it;
+- the chosen system prompt is used for live context and the final protocol;
+- early events remain represented across updates, and the GUI displays generation progress;
+- final protocol includes early decisions and the last confirmed utterance;
+- after delivery, the used model is unloaded on the test server and its service remains available;
+- failure or slowness of AI never interrupts audio capture or transcription.
+
+Diarization and SQLite are not prerequisites. At this phase speakers remain YOU/REMOTE, and the result is held in the session until a new meeting or app closure. Copying does not clear the result.
+
+---
+
+## Phase 9 — FluidAudio diarization
 
 Add diarization ONLY to REMOTE.
 
@@ -1271,7 +1320,7 @@ Expose diarization state in GUI.
 
 ---
 
-## Phase 9 — Voice profiles and identification
+## Phase 10 — Voice profiles and identification
 
 Implement:
 
@@ -1294,7 +1343,7 @@ Acceptance criteria:
 
 ---
 
-## Phase 10 — Persistent transcript storage
+## Phase 11 — Persistent meeting storage and history
 
 Add SQLite or equivalent local persistence.
 
@@ -1305,48 +1354,17 @@ meetings
 transcript events
 speakers
 voice profiles
+context snapshots
+final protocols
 ```
 
-GUI should support basic meeting history.
+Reuse stable event IDs introduced in Phase 8. GUI should support meeting history, including saved transcripts and AI results.
 
 ---
 
-## Phase 11 — Ollama integration
+## Phase 12 — Full saved meeting result
 
-Add local Ollama client.
-
-Acceptance criteria:
-
-- detect Ollama availability;
-- select local model;
-- send only finalized transcript events;
-- context failure does not stop transcription.
-
----
-
-## Phase 12 — Live contextual briefing
-
-Implement structured state:
-
-```text
-topic
-facts
-decisions
-open questions
-actions
-owners
-deadlines
-```
-
-Refresh incrementally.
-
-Display in the Live Meeting GUI.
-
----
-
-## Phase 13 — Full meeting result
-
-After Stop:
+Extend the protocol already implemented in Phase 8 with persisted history and identified participants. After Stop and when reopening a meeting:
 
 generate/display:
 
@@ -1364,7 +1382,7 @@ Support export later.
 
 ---
 
-## Phase 14 — GUI refinement
+## Phase 13 — GUI refinement
 
 Improve:
 
@@ -1396,16 +1414,13 @@ speaker embeddings
 speaker identification
 voice profiles
 SQLite
-Ollama
-Qwen
 RAG
-context briefing
 full SwiftUI UI
 menu bar integration
-cloud services
+cloud speech services
 ```
 
-They are in the roadmap, but not part of the current audio/ASR milestone.
+These are not part of the next Ollama milestone. A user-configured Ollama server and native AI settings/live context/protocol UI are explicitly in scope. Do not implement the entire roadmap at once.
 
 ---
 
@@ -1452,9 +1467,9 @@ Once the GUI exists, README should describe the normal user workflow instead of 
 
 ---
 
-# Definition of Done — current milestone
+# Definition of Done — completed audio/ASR milestone
 
-Current audio/ASR milestone is complete only when:
+Preserve the completed audio/ASR baseline criteria:
 
 ```text
 ✓ BlackHole discovered programmatically
@@ -1477,6 +1492,26 @@ Do not proceed to diarization until this is stable.
 
 ---
 
+# Definition of Done — next Ollama milestone
+
+```text
+✓ configurable Ollama server URL
+✓ automatic model listing and explicit selection
+✓ editable saved system prompt
+✓ finalized YOU/REMOTE events feed bounded AI processing
+✓ streamed context retains earlier events and source links
+✓ ASR remains usable when Ollama is unavailable
+✓ Stop includes the final ASR tail in the protocol
+✓ complete protocol is displayed and can be copied
+✓ selected model is unloaded via API after delivery and verified
+✓ cancellation/error cleanup does not stop the server service
+✓ delayed cleanup cannot unload a newer session's model
+```
+
+These are acceptance criteria, not a claim that Phase 8 is already implemented.
+
+---
+
 # Definition of Done — final product
 
 The product is considered functionally complete when:
@@ -1493,11 +1528,13 @@ The product is considered functionally complete when:
 ✓ speaker identity can be corrected in GUI
 ✓ transcript is persisted locally
 ✓ Ollama can generate live context
+✓ Ollama server/model/system prompt can be configured
 ✓ Ollama failure does not interrupt transcription
 ✓ decisions and actions link back to transcript sources
 ✓ meetings can be reopened from history
 ✓ final transcript and summary are available after Stop
-✓ processing remains local
+✓ final protocol can be copied and its model unloaded through the API
+✓ audio remains local; AI uses only the user-configured server
 ```
 
 ---
@@ -1517,13 +1554,14 @@ Core/UI separation
     ↓
 basic GUI
     ↓
+Ollama context / protocol / model unloading
+    ↓
 speaker diarization
     ↓
 speaker identification
     ↓
 persistent transcript
-    ↓
-Ollama context
+and AI results
     ↓
 full GUI workflow
 ```
