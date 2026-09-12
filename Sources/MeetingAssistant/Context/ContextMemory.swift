@@ -1,11 +1,28 @@
 import Foundation
 import Synchronization
 
+struct ContextInputEvent: Codable, Sendable, Equatable {
+    let id: String
+    let source: String
+    let startTime: Double
+    let endTime: Double
+    let text: String
+    let kind: String
+    init(_ event: TranscriptEvent) {
+        id = event.id; source = event.source.rawValue; startTime = event.startTime
+        endTime = event.endTime; text = event.text; kind = "transcript"
+    }
+    init(_ message: ContextMessage) {
+        id = message.id; source = "USER_NOTE"; startTime = message.time
+        endTime = message.time; text = message.text; kind = "userNote"
+    }
+}
+
 /// Synchronous, bounded intake from TranscriptTimeline, never awaiting HTTP.
 /// Keeping the journal separate from the actor prevents a slow server backing up ASR.
 final class MeetingEventJournal: Sendable {
     struct Storage: Sendable {
-        var events: [TranscriptEvent] = []
+        var events: [ContextInputEvent] = []
         var ids: Set<String> = []
         var bytes = 0
         var closed = false
@@ -14,6 +31,10 @@ final class MeetingEventJournal: Sendable {
     private let storage = Mutex(Storage())
 
     func append(_ event: TranscriptEvent) {
+        append(ContextInputEvent(event))
+    }
+
+    func append(_ event: ContextInputEvent) {
         storage.withLock { state in
             guard !state.closed, state.failure == nil, !state.ids.contains(event.id) else { return }
             guard state.events.count < 12_000, state.bytes + event.text.utf8.count <= 16_777_216 else {
@@ -23,6 +44,18 @@ final class MeetingEventJournal: Sendable {
             state.events.append(event)
             state.ids.insert(event.id)
             state.bytes += event.text.utf8.count
+        }
+    }
+
+    func appendMessage(_ message: ContextMessage) throws {
+        try storage.withLock { state in
+            guard !state.closed, state.failure == nil else { throw MeetingError("Приём сообщений в контекст уже завершён.") }
+            guard state.events.count < 12_000, state.bytes + message.text.utf8.count <= 16_777_216 else {
+                throw MeetingError("Достигнут лимит журнала AI. Сообщение не отправлено.")
+            }
+            state.events.append(ContextInputEvent(message))
+            state.ids.insert(message.id)
+            state.bytes += message.text.utf8.count
         }
     }
 
@@ -40,7 +73,7 @@ struct ContextMemory: Sendable {
     private(set) var briefing = ContextBriefing()
     private var nextID = 1
 
-    mutating func apply(_ delta: ContextDelta, newEvents: [TranscriptEvent], knownIDs: Set<String>) throws {
+    mutating func apply(_ delta: ContextDelta, newEvents: [ContextInputEvent], knownIDs: Set<String>) throws {
         guard delta.topic.utf8.count <= 1000, delta.summary.utf8.count <= 6000, delta.updates.count <= 32 else {
             throw MeetingError("Справка превысила допустимый размер обновления.")
         }
@@ -98,7 +131,7 @@ struct ContextMemory: Sendable {
 
     /// Keep every committed entry in memory. Select relevant entries for a bounded
     /// request; absence from a model update never deletes older facts/decisions.
-    func promptContext(for events: [TranscriptEvent], byteLimit: Int) throws -> String {
+    func promptContext(for events: [ContextInputEvent], byteLimit: Int) throws -> String {
         let words = Self.keywords(events.map(\.text).joined(separator: " "))
         let ranked = briefing.entries.enumerated().sorted { a, b in
             func score(_ value: (offset: Int, element: ContextEntry)) -> Int {

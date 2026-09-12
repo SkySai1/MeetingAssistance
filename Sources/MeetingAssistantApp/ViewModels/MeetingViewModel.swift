@@ -67,6 +67,9 @@ final class MeetingViewModel: ObservableObject {
     @Published private(set) var aiState = AIState()
     @Published private(set) var aiWasEnabled = false
     @Published var focusedEventID: String?
+    @Published var contextMessage = ""
+    @Published private(set) var contextMessageError: String?
+    @Published private(set) var isSendingContextMessage = false
     let aiSettings: AISettingsViewModel
 
     private let preferences: UserDefaults
@@ -159,6 +162,7 @@ final class MeetingViewModel: ObservableObject {
         if !audioTest {
             transcript = []; elapsed = 0; hasMeeting = true
             aiWasEnabled = ai != nil; aiState = AIState(); focusedEventID = nil
+            contextMessage = ""; contextMessageError = nil
         }
         // Mark busy before permission/model loading so repeated clicks cannot start
         // overlapping sessions. Stop is also valid while permission is pending.
@@ -266,6 +270,18 @@ final class MeetingViewModel: ObservableObject {
 
     func cancelAnalysis() { session?.cancelAnalysis() }
     func retryAnalysis() { session?.retryAnalysis() }
+    var canSendContextMessage: Bool { isBusy && aiWasEnabled && canStop && !isSendingContextMessage && ![.disabled, .cancelled, .completed, .unloading].contains(aiState.phase) }
+    func sendContextMessage() async {
+        guard canSendContextMessage, let session else { return }
+        let text = contextMessage
+        isSendingContextMessage = true
+        defer { isSendingContextMessage = false }
+        do {
+            try await session.addContextMessage(text, time: elapsed)
+            if contextMessage == text { contextMessage = "" }
+            contextMessageError = nil
+        } catch { contextMessageError = String(describing: error) }
+    }
 
     func copyProtocol() {
         guard aiState.protocolComplete else { return }

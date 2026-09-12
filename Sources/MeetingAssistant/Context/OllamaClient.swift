@@ -32,18 +32,19 @@ struct OllamaChatRequest: Encodable, Sendable {
 /// Ollama's structured output grammar constrains identifiers and required fields;
 /// semantic checks and source validation still run before committing the response.
 indirect enum OllamaSchema: Encodable, Sendable {
-    case string([String]? = nil)
+    case string([String]? = nil, maximum: Int? = nil)
     case object([String: OllamaSchema])
     case array(OllamaSchema, Int, minimum: Int = 0)
     case alternatives([OllamaSchema])
 
-    private enum Keys: String, CodingKey { case type, properties, required, additionalProperties, items, maxItems, minItems, oneOf, `enum` }
+    private enum Keys: String, CodingKey { case type, properties, required, additionalProperties, items, maxItems, minItems, maxLength, oneOf, `enum` }
     func encode(to encoder: any Encoder) throws {
         var values = encoder.container(keyedBy: Keys.self)
         switch self {
-        case .string(let allowed):
+        case .string(let allowed, let maximum):
             try values.encode("string", forKey: .type)
             try values.encodeIfPresent(allowed, forKey: .enum)
+            try values.encodeIfPresent(maximum, forKey: .maxLength)
         case .object(let properties):
             try values.encode("object", forKey: .type)
             try values.encode(properties, forKey: .properties)
@@ -59,8 +60,8 @@ indirect enum OllamaSchema: Encodable, Sendable {
         }
     }
 
-    static func context(entries: [ContextEntry], eventIDs: [String]) -> Self {
-        .object(["topic": .string(), "summary": .string(), "updates": .array(.alternatives(ContextKind.allCases.map { kind in
+    static func context(entries: [ContextEntry], eventIDs: [String], summaryLimit: Int = 500) -> Self {
+        .object(["topic": .string(), "summary": .string(maximum: summaryLimit), "updates": .array(.alternatives(ContextKind.allCases.map { kind in
             .object([
                 "id": .string([""] + entries.filter { $0.kind == kind }.map(\.id)), "kind": .string([kind.rawValue]),
                 "text": .string(), "sourceIDs": .array(.string(eventIDs), 32, minimum: 1),

@@ -8,6 +8,7 @@ struct AISettingsView: View {
     var body: some View {
         Form {
             Section("Контекст и протокол встречи") {
+                if let error = settings.storageError { Text(error).foregroundStyle(.orange) }
                 Toggle("Использовать Ollama", isOn: $settings.enabled)
                 Text("Подтверждённый текст отправляется на выбранный сервер. Микрофон и распознавание работают на этом Mac.")
                     .font(.callout).foregroundStyle(.secondary)
@@ -44,6 +45,9 @@ struct AISettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Обновление справки") {
+                Stepper("Summary: до \(settings.configuration.summaryCharacterLimit) символов", value: $settings.configuration.summaryCharacterLimit, in: 100...1500, step: 50)
+                Stepper("Фактов в справке: до \(settings.configuration.factLimit)", value: $settings.configuration.factLimit, in: 1...100)
+                Text("Summary остаётся коротким. Остальные факты сохраняются в памяти встречи и учитываются в протоколе.").font(.caption).foregroundStyle(.secondary)
                 Stepper("Интервал: \(Int(settings.configuration.updateInterval)) с", value: $settings.configuration.updateInterval, in: 2...120, step: 2)
                 Picker("Контекст модели", selection: $settings.configuration.contextTokens) {
                     Text("16 384 токена").tag(16384)
@@ -51,6 +55,10 @@ struct AISettingsView: View {
                 }
                 Text("Больший контекст позволяет учитывать больше данных за один запрос и требует больше памяти сервера. Новые фразы объединяются; параллельные обновления одной встречи не запускаются.")
                     .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Файлы настроек") {
+                Text(settings.store.directory.path).textSelection(.enabled)
+                Text("settings.json · system-prompt.txt. Файлы загружаются при запуске приложения.").font(.caption).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

@@ -20,6 +20,10 @@ public final class MeetingSession: Sendable {
     public func requestStop() { stopRequested.store(true, ordering: .releasing) }
     public func cancelAnalysis() { if let analysis { Task { await analysis.cancel() } } }
     public func retryAnalysis() { if let analysis { Task { await analysis.retry() } } }
+    public func addContextMessage(_ text: String, time: Double) async throws {
+        guard let analysis, !stopRequested.load(ordering: .acquiring) else { throw MeetingError("AI не включён или встреча уже завершается.") }
+        try await analysis.addMessage(text, time: time)
+    }
 
     public func run() async throws {
         guard !started.exchange(true, ordering: .acquiringAndReleasing) else {
