@@ -56,6 +56,7 @@ final class WhisperTranscriber: @unchecked Sendable {
         // upstream ModelUtilities (its variant helpers are internal in this revision).
         guard logits == 51866, embeddings == 1280 else { throw MeetingError("This milestone requires a Whisper large-v3 model; got logits=\(logits), embeddings=\(embeddings)") }
         kit.textDecoder.isModelMultilingual = true
+        kit.textDecoder.logitsFilters = [InitialTimestampFilter(timeTokenBegin: tokenizer.specialTokens.timeTokenBegin, vocabularySize: logits)]
         Log.info("\(source.rawValue) WhisperKit ready: large-v3 (local tokenizer; downloads disabled)")
     }
 
@@ -76,7 +77,7 @@ final class WhisperTranscriber: @unchecked Sendable {
         // even after the final attempt. Decode the full greedy hypothesis once;
         // apply no-speech/validity checks to its completed result below.
         let options = DecodingOptions(language: "ru", temperatureFallbackCount: 0,
-            detectLanguage: false, skipSpecialTokens: true, wordTimestamps: true, maxInitialTimestamp: 1,
+            detectLanguage: false, skipSpecialTokens: true, wordTimestamps: true,
             windowClipTime: 0, suppressBlank: true, compressionRatioThreshold: nil,
             logProbThreshold: nil, firstTokenLogProbThreshold: nil, concurrentWorkerCount: 1)
         // AudioStreamTranscriber in e687e26 owns startRecordingLive and unbounded

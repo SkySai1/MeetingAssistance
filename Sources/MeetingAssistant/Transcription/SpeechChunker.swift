@@ -8,7 +8,9 @@ struct SpeechChunk: Sendable {
 }
 
 // Energy endpointing on 20 ms frames; this is a configurable speech gate, not diarization.
-// Long speech uses 12 s windows with 2 s context overlap. The decoder confirms only
+// After 4 s, a 200 ms pause ends a phrase before a forced split can cut a word.
+// Short utterances retain a 700 ms hangover to keep nearby words together.
+// Uninterrupted speech uses 12 s windows with 2 s context overlap. The decoder confirms only
 // words ending at least 1 s before a non-final window's edge.
 struct SpeechChunker: Sendable {
     let threshold: Float
@@ -45,7 +47,7 @@ struct SpeechChunker: Sendable {
             if voiced { active = true; silenceFrames = 0; voiceFrames += 1 }
             else if active { silenceFrames += 1 }
 
-            if active && silenceFrames >= 35 {
+            if active && (silenceFrames >= 35 || (audio.count >= 64000 && silenceFrames >= 10)) {
                 if voiceFrames >= 10 { chunks.append(SpeechChunk(samples: audio, start: audioStart, isFinal: true)) }
                 audio.removeAll(keepingCapacity: true)
                 active = false; silenceFrames = 0; voiceFrames = 0

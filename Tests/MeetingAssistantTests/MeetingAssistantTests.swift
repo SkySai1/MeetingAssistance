@@ -1,5 +1,6 @@
 import Foundation
 import Synchronization
+import CoreML
 import Testing
 @testable import MeetingAssistant
 
@@ -63,6 +64,20 @@ import Testing
     #expect(tail?.isFinal == true)
     #expect(tail?.start == 30)
     #expect(tail?.samples.count == 80000)
+}
+
+@Test func longPhrasesEndAtShortPausesWithoutSplittingShortUtterances() {
+    var chunker = SpeechChunker(thresholdDB: -42)
+    #expect(chunker.append([Float](repeating: 0.1, count: 16000), start: 0).isEmpty)
+    #expect(chunker.append([Float](repeating: 0, count: 3200), start: 1).isEmpty)
+    #expect(chunker.append([Float](repeating: 0.1, count: 48000), start: 1.2).isEmpty)
+    #expect(chunker.append([Float](repeating: 0, count: 2880), start: 4.2).isEmpty)
+    let chunks = chunker.append([Float](repeating: 0, count: 320), start: 4.38)
+    #expect(chunks.count == 1)
+    #expect(chunks.first?.isFinal == true)
+    #expect(chunks.first?.start == 0)
+    #expect(abs((chunks.first?.end ?? 0) - 4.4) < 0.001)
+    #expect(chunker.finish() == nil)
 }
 
 private final class EventCollector: Sendable {
@@ -147,4 +162,18 @@ private final class EventCollector: Sendable {
         #expect(events.map(\.text) == ["Да, я согласен."])
         #expect(events.first?.source == .you)
     }
+}
+
+@Test func initialTimestampLimitAppliesOnlyDuringInitialPrompt() throws {
+    let filter = InitialTimestampFilter(timeTokenBegin: 50366, vocabularySize: 51866)
+    // The resolved WhisperKit filters use Float16 logits on Apple Silicon.
+    let logits = try MLMultiArray(shape: [1, 1, 51866], dataType: .float16)
+    for index in 0..<logits.count { logits[index] = 0 }
+    let initial = filter.filterLogits(logits, withTokens: [50258, 50263, 50359, 50366])
+    #expect(initial[50366].floatValue == 0)
+    #expect(initial[50416].floatValue == 0)
+    #expect(initial[50417].floatValue == -.infinity)
+    logits[50500] = 0
+    let later = filter.filterLogits(logits, withTokens: [50258, 50263, 50359, 50366, 123])
+    #expect(later[50500].floatValue == 0)
 }

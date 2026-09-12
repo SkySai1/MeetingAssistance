@@ -37,9 +37,10 @@ def main():
         selector.register(stream, selectors.EVENT_READ, kind)
     buffers = {"events": b"", "diagnostics": b""}
     events, diagnostics, errors = [], [], []
+    delivery_lags = []
     playback = {"remote": None, "you": None}
     next_you = float("inf")
-    first_cycle_end = None
+    speech_cycle_ends = []
     began, capture_began, last_report = time.monotonic(), None, time.monotonic()
     files = {"events": (destination / "transcript.jsonl").open("wb"), "diagnostics": (destination / "diagnostics.log").open("wb")}
     try:
@@ -65,6 +66,8 @@ def main():
                         try:
                             event = json.loads(text)
                             events.append(event)
+                            if capture_began is not None:
+                                delivery_lags.append(max(0, time.monotonic() - capture_began - event["endTime"]))
                             print(f"[{event['startTime']:8.3f}] {event['source']}: {event['text']}", flush=True)
                         except (ValueError, KeyError) as error:
                             errors.append(f"Invalid finalized event: {error}")
@@ -83,8 +86,8 @@ def main():
                     if remote is not None and remote.returncode != 0:
                         errors.append(f"Remote playback failed: {remote.returncode}")
                         break
-                    if remote is not None and first_cycle_end is None:
-                        first_cycle_end = time.monotonic() - capture_began
+                    if remote is not None:
+                        speech_cycle_ends.append(time.monotonic() - capture_began)
                     playback["remote"] = subprocess.Popen(["say", "--audio-device=BlackHole 2ch", "-v", "Milena", "-r", "190", "-f", "Scripts/fixtures/remote-ru.txt"])
                 you = playback["you"]
                 if args.mode == "dual" and args.microphone_playback_device and time.monotonic() >= next_you and (you is None or you.poll() is not None):
@@ -131,30 +134,51 @@ def main():
         errors.append("One of the required sources produced no transcript events")
     if any(line.startswith("ERROR:") or "WARNING:" in line for line in diagnostics):
         errors.append("Diagnostics contain an error or warning")
-    coverage = None
-    if first_cycle_end is not None:
+    cycle_scores = []
+    if speech_cycle_ends:
         def words(text):
             return re.findall(r"[a-zа-я0-9]+", text.lower().replace("ё", "е"))
         expected = words((root / "Scripts/fixtures/remote-ru.txt").read_text())
-        actual = words(" ".join(e["text"] for e in events if e["source"] == "REMOTE" and e["startTime"] < first_cycle_end))
         # Ordered word recall tolerates punctuation/spelling differences but catches
         # entire missing windows that event-count and timing checks would overlook.
-        row = [0] * (len(actual) + 1)
-        for expected_word in expected:
-            next_row = [0]
-            for index, actual_word in enumerate(actual):
-                next_row.append(row[index] + 1 if expected_word == actual_word else max(row[index + 1], next_row[-1]))
-            row = next_row
-        coverage = round(row[-1] / max(1, len(expected)), 4)
-        if coverage < 0.90:
-            errors.append(f"First full speech cycle has low ordered word recall: {coverage:.1%}")
+        cycle_start = 0
+        for cycle_end in speech_cycle_ends:
+            actual = words(" ".join(e["text"] for e in events if e["source"] == "REMOTE" and cycle_start <= e["startTime"] < cycle_end))
+            row = [0] * (len(actual) + 1)
+            for expected_word in expected:
+                next_row = [0]
+                for index, actual_word in enumerate(actual):
+                    next_row.append(row[index] + 1 if expected_word == actual_word else max(row[index + 1], next_row[-1]))
+                row = next_row
+            coverage = round(row[-1] / max(1, len(expected)), 4)
+            precision = round(row[-1] / max(1, len(actual)), 4)
+            cycle_scores.append({"start": round(cycle_start, 3), "end": round(cycle_end, 3), "recall": coverage, "precision": precision})
+            if coverage < 0.90 or precision < 0.90:
+                errors.append(f"Speech cycle {len(cycle_scores)} has low ordered word scores: recall={coverage:.1%}, precision={precision:.1%}")
+            cycle_start = cycle_end
     rss = [float(m.group(1)) for line in diagnostics if (m := re.search(r"RSS ([\d.]+) MB", line))]
     lag = [float(m.group(1)) for line in diagnostics if (m := re.search(r"\| lag ([\d.]+)s", line))]
+    captures = {m.group(1): float(m.group(2)) for line in diagnostics
+                if (m := re.search(r"(YOU|REMOTE) capture stopped: ([\d.]+)s", line))}
+    for source in (["REMOTE"] if args.mode == "remote" else ["YOU", "REMOTE"]):
+        if captures.get(source, 0) < args.duration - 0.25:
+            errors.append(f"{source} did not capture the requested duration")
+    callback_lags = [float(m.group(1)) for line in diagnostics
+                     if (m := re.search(r"maximum callback-consumer lag ([\d.]+)s", line))]
+    queue = [float(m.group(1)) for line in diagnostics if (m := re.search(r"ASR queue ([\d.]+)s", line))]
+    def percentile(values, fraction):
+        return round(sorted(values)[int((len(values) - 1) * fraction)], 3) if values else None
     report = {"mode": args.mode, "requested_capture_seconds": args.duration, "event_counts": counts,
+        "actual_capture_seconds": captures,
         "chronological": times == sorted(times), "exact_duplicate_events": len(identities) - len(set(identities)),
         "rss_mb": {"first": rss[0] if rss else None, "last": rss[-1] if rss else None, "max": max(rss, default=None)},
         "completion_lag_seconds": {"first": lag[0] if lag else None, "last": lag[-1] if lag else None, "max": max(lag, default=None)},
-        "first_cycle_ordered_word_recall": coverage,
+        "delivery_lag_seconds": {"p50": percentile(delivery_lags, 0.50), "p95": percentile(delivery_lags, 0.95), "max": max(delivery_lags, default=None)},
+        "max_callback_consumer_lag_seconds": max(callback_lags, default=None),
+        "max_sampled_asr_backlog_seconds": max(queue, default=None),
+        "first_cycle_ordered_word_recall": cycle_scores[0]["recall"] if cycle_scores else None,
+        "first_cycle_ordered_word_precision": cycle_scores[0]["precision"] if cycle_scores else None,
+        "full_speech_cycles": cycle_scores,
         "acoustic_microphone_playback": args.microphone_playback_device, "errors": errors}
     (destination / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
