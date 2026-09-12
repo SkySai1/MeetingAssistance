@@ -1,4 +1,4 @@
-enum AudioSource: String, CaseIterable, Sendable, Codable {
+public enum AudioSource: String, CaseIterable, Sendable, Codable {
     case you = "YOU"
     case remote = "REMOTE"
 }

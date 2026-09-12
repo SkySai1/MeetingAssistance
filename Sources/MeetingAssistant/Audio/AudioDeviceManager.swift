@@ -1,24 +1,25 @@
 import CoreAudio
 import Foundation
 
-struct MeetingError: Error, CustomStringConvertible {
-    let description: String
-    init(_ description: String) { self.description = description }
+public struct MeetingError: Error, CustomStringConvertible, LocalizedError {
+    public let description: String
+    public var errorDescription: String? { description }
+    public init(_ description: String) { self.description = description }
 }
 
 func checkAudio(_ status: OSStatus, _ operation: String) throws {
     guard status == noErr else { throw MeetingError("\(operation): OSStatus \(status)") }
 }
 
-struct AudioDevice: Sendable {
-    let id: AudioDeviceID
-    let name: String
-    let inputChannels: Int
-    let sampleRate: Double
+public struct AudioDevice: Sendable, Identifiable, Equatable {
+    public let id: AudioDeviceID
+    public let name: String
+    public let inputChannels: Int
+    public let sampleRate: Double
 }
 
-enum AudioDeviceManager {
-    static func defaultDeviceIDs() throws -> (input: AudioDeviceID, output: AudioDeviceID) {
+public enum AudioDeviceManager {
+    public static func defaultDeviceIDs() throws -> (input: AudioDeviceID, output: AudioDeviceID) {
         func read(_ selector: AudioObjectPropertySelector) throws -> AudioDeviceID {
             var property = address(selector)
             var id: AudioDeviceID = 0
@@ -34,7 +35,7 @@ enum AudioDeviceManager {
         AudioObjectPropertyAddress(mSelector: selector, mScope: scope, mElement: kAudioObjectPropertyElementMain)
     }
 
-    static func devices() throws -> [AudioDevice] {
+    public static func devices() throws -> [AudioDevice] {
         var property = address(kAudioHardwarePropertyDevices)
         var size: UInt32 = 0
         try checkAudio(AudioObjectGetPropertyDataSize(AudioObjectID(kAudioObjectSystemObject), &property, 0, nil, &size), "Enumerate audio devices")
@@ -62,7 +63,7 @@ enum AudioDeviceManager {
         }
     }
 
-    static func select(_ devices: [AudioDevice], name: String?, source: AudioSource) throws -> AudioDevice {
+    public static func select(_ devices: [AudioDevice], name: String?, source: AudioSource) throws -> AudioDevice {
         let inputs = devices.filter { $0.inputChannels > 0 }
         let matches = inputs.filter { device in
             if let name { return device.name == name }

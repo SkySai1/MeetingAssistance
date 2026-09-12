@@ -1,16 +1,10 @@
 import Foundation
 
-struct TranscriptEvent: Codable, Sendable, Equatable {
-    let source: AudioSource
-    let startTime: Double
-    let endTime: Double
-    let text: String
-
-    var terminalLine: String {
-        let milliseconds = Int((max(0, startTime) * 1000).rounded())
-        return String(format: "[%02d:%02d.%03d] [%@] %@", milliseconds / 60000,
-                      (milliseconds / 1000) % 60, milliseconds % 1000, source.rawValue, text)
-    }
+public struct TranscriptEvent: Codable, Sendable, Equatable {
+    public let source: AudioSource
+    public let startTime: Double
+    public let endTime: Double
+    public let text: String
 }
 
 // A source frontier is the earliest time at which it can still produce an event.

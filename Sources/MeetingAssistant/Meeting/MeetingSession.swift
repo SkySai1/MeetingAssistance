@@ -1,45 +1,82 @@
 import Foundation
+import Synchronization
 
-struct MeetingSession {
-    let options: Options
-    let selected: [AudioSource: AudioDevice]
+/// A single meeting run, shared by CLI and GUI. Create a new instance to restart.
+/// requestStop drains captured audio and final ASR; task cancellation aborts work.
+public final class MeetingSession: Sendable {
+    private let configuration: MeetingConfiguration
+    private let callbacks: MeetingCallbacks
+    private let started = Atomic<Bool>(false)
+    private let stopRequested = Atomic<Bool>(false)
+    private let stoppingPublished = Atomic<Bool>(false)
 
-    func run() async throws {
-        let sources: [AudioSource] = options.remoteOnly ? [.remote] : AudioSource.allCases
-        let timeline = TranscriptTimeline(sources: sources) { event in
-            let data: Data
-            if options.json {
-                let encoder = JSONEncoder()
-                encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-                data = try encoder.encode(event) + Data([10])
-            } else { data = Data((event.terminalLine + "\n").utf8) }
-            try FileHandle.standardOutput.write(contentsOf: data)
+    public init(configuration: MeetingConfiguration, callbacks: MeetingCallbacks = MeetingCallbacks()) {
+        self.configuration = configuration
+        self.callbacks = callbacks
+    }
+
+    public func requestStop() { stopRequested.store(true, ordering: .releasing) }
+
+    public func run() async throws {
+        guard !started.exchange(true, ordering: .acquiringAndReleasing) else {
+            throw MeetingError("A MeetingSession can only run once; create a new session")
         }
-        let stop = StopSignal()
-        var transcribers: [AudioSource: WhisperTranscriber] = [:]
-        var pipelines: [AudioSource: StreamPipeline] = [:]
-        if !options.captureOnly {
-            let paths = try ModelPaths(model: options.modelPath, tokenizer: options.tokenizerPath)
-            Log.info("\nLoading WhisperKit locally...\nModel: \(paths.model.path)\nTokenizer: \(paths.tokenizer.path)\nLanguage: ru")
-            for source in sources {
-                transcribers[source] = try await WhisperTranscriber(source: source, paths: paths, debugDirectory: options.debugAudioDirectory)
-                if stop.requested { return }
-                pipelines[source] = StreamPipeline(source: source, thresholdDB: options.thresholdDB, timeline: timeline)
+        try await Log.$sink.withValue(callbacks.diagnostic) {
+            do {
+                callbacks.phase(.preparing)
+                try configuration.validate()
+                if !stopRequested.load(ordering: .acquiring) { try await runSession() }
+                callbacks.phase(.stopped)
+            } catch {
+                callbacks.phase(.failed(String(describing: error)))
+                throw error
             }
         }
+    }
+
+    private func publishStopping() {
+        if !stoppingPublished.exchange(true, ordering: .acquiringAndReleasing) {
+            callbacks.phase(.stopping)
+        }
+    }
+
+    private func runSession() async throws {
+        let sources = configuration.sources
+        let timeline = TranscriptTimeline(sources: sources, output: callbacks.transcript)
+        var transcribers: [AudioSource: WhisperTranscriber] = [:]
+        var pipelines: [AudioSource: StreamPipeline] = [:]
+        if !configuration.captureOnly {
+            callbacks.phase(.loadingModels)
+            let paths = try ModelPaths(model: configuration.modelPath, tokenizer: configuration.tokenizerPath)
+            Log.info("\nLoading WhisperKit locally...\nModel: \(paths.model.path)\nTokenizer: \(paths.tokenizer.path)\nLanguage: ru")
+            for source in sources {
+                transcribers[source] = try await WhisperTranscriber(source: source, paths: paths, debugDirectory: configuration.debugAudioDirectory)
+                try Task.checkCancellation()
+                if stopRequested.load(ordering: .acquiring) { return }
+                pipelines[source] = StreamPipeline(source: source, thresholdDB: configuration.thresholdDB, timeline: timeline)
+            }
+        }
+        try Task.checkCancellation()
+        if stopRequested.load(ordering: .acquiring) { return }
+        // Recheck IDs and names after model loading; never fall back to a default.
+        let available = try AudioDeviceManager.devices()
         let captures = try sources.map { source -> AudioCapture in
-            guard let device = selected[source] else { throw MeetingError("No selected device for \(source.rawValue)") }
+            guard let selected = configuration.selected[source],
+                  let device = available.first(where: { $0.id == selected.id && $0.name == selected.name && $0.inputChannels > 0 }) else {
+                throw MeetingError("\(source.rawValue): selected audio device is no longer available. Reconnect it and refresh audio devices.")
+            }
             return try AudioCapture(source: source, device: device)
         }
         let clock = MeetingClock()
         defer { captures.forEach { $0.stop() } }
         Log.info("\nStarting audio capture...")
         for capture in captures { try capture.start(); Log.info("\(capture.source.rawValue) stream ready") }
-        Log.info(options.captureOnly ? "Capturing independent PCM. Ctrl-C to stop." : "Transcription started. Finalized events on stdout; diagnostics on stderr. Ctrl-C stops capture and drains ASR.")
+        callbacks.phase(.running)
+        Log.info(configuration.captureOnly ? "Capturing independent PCM." : "Transcription started.")
         try await withThrowingTaskGroup(of: Void.self) { group in
             for capture in captures {
                 let pipeline = pipelines[capture.source]
-                group.addTask { try await captureLoop(capture, pipeline: pipeline, clock: clock, stop: stop) }
+                group.addTask { try await self.captureLoop(capture, pipeline: pipeline, clock: clock) }
                 if let pipeline, let transcriber = transcribers[capture.source] {
                     group.addTask {
                         while true {
@@ -71,9 +108,12 @@ struct MeetingSession {
         Log.info("Meeting stopped. Finalized events: \(await timeline.emittedCount).")
     }
 
-    private func captureLoop(_ capture: AudioCapture, pipeline: StreamPipeline?, clock: MeetingClock, stop: StopSignal) async throws {
+    private func captureLoop(_ capture: AudioCapture, pipeline: StreamPipeline?, clock: MeetingClock) async throws {
         let resampler = try pipeline.map { _ in try AudioResampler(device: capture.device) }
         var lastReport = 0.0
+        var lastMeter = 0.0
+        var meterSum = 0.0
+        var meterCount = 0
         var sum: Double = 0
         var count = 0
         var totalFrames = 0
@@ -90,7 +130,11 @@ struct MeetingSession {
             lastPacket = clock.now
             let time = clock.seconds(at: packet.hostTime)
             maxCaptureLag = max(maxCaptureLag, clock.now - time)
-            for sample in packet.samples { sum += Double(sample * sample) }
+            for sample in packet.samples {
+                let energy = Double(sample * sample)
+                sum += energy; meterSum += energy
+            }
+            meterCount += packet.samples.count
             count += packet.samples.count
             if let pipeline, let resampler {
                 let converted = try resampler.convert(packet, time: time)
@@ -98,11 +142,17 @@ struct MeetingSession {
             }
         }
 
-        while !stop.requested && clock.now < (options.duration ?? .infinity) {
+        while !stopRequested.load(ordering: .acquiring) && clock.now < (configuration.duration ?? .infinity) {
             try Task.checkCancellation()
             while let packet = try capture.ring.pop() { try await consume(packet) }
             if clock.now - lastPacket > 3 { throw MeetingError("\(capture.source.rawValue): no audio callbacks for 3 seconds") }
-            if clock.now - lastReport >= (options.captureOnly ? 1 : 5) {
+            if clock.now - lastMeter >= 0.2 {
+                callbacks.metrics(AudioMetrics(source: capture.source, elapsed: clock.now,
+                    levelDB: 10 * log10(max(meterSum / Double(max(meterCount, 1)), 1e-12)),
+                    backlogSeconds: await pipeline?.backlogSeconds ?? 0))
+                meterSum = 0; meterCount = 0; lastMeter = clock.now
+            }
+            if clock.now - lastReport >= (configuration.captureOnly ? 1 : 5) {
                 let db = 10 * log10(max(sum / Double(max(count, 1)), 1e-12))
                 let backlog = await pipeline?.backlogSeconds ?? 0
                 Log.info(String(format: "[%07.3f] %@ level: %6.1f dBFS | captured %.2fs | ASR queue %.2fs | RSS %.0f MB",
@@ -112,6 +162,7 @@ struct MeetingSession {
             try await Task.sleep(for: .milliseconds(10))
         }
         capture.stop()
+        publishStopping()
         while let packet = try capture.ring.pop() { try await consume(packet) }
         try await pipeline?.finish()
         Log.info(String(format: "%@ capture stopped: %.2fs, maximum callback-consumer lag %.3fs", capture.source.rawValue,

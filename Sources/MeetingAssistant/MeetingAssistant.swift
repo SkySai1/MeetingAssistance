@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import Synchronization
+import MeetingAssistantCore
 
 @main
 struct MeetingAssistant {
@@ -26,7 +27,27 @@ struct MeetingAssistant {
             guard await AVCaptureDevice.requestAccess(for: .audio) else {
                 throw MeetingError("Microphone permission denied. Enable microphone access for the launching terminal/application in System Settings > Privacy & Security > Microphone.")
             }
-            try await MeetingSession(options: options, selected: selected).run()
+            let session = MeetingSession(configuration: options.configuration(selected: selected), callbacks: MeetingCallbacks(
+                diagnostic: { Log.info($0) },
+                transcript: { event in
+                    let data: Data
+                    if options.json {
+                        let encoder = JSONEncoder()
+                        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+                        data = try encoder.encode(event) + Data([10])
+                    } else { data = Data((event.terminalLine + "\n").utf8) }
+                    try FileHandle.standardOutput.write(contentsOf: data)
+                }
+            ))
+            let stop = StopSignal()
+            let signalMonitor = Task {
+                while !Task.isCancelled {
+                    if stop.requested { session.requestStop(); return }
+                    do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
+                }
+            }
+            defer { signalMonitor.cancel() }
+            try await session.run()
             let finalDefaults = try AudioDeviceManager.defaultDeviceIDs()
             Log.info("System defaults after capture: input [\(finalDefaults.input)], output [\(finalDefaults.output)]")
         } catch {

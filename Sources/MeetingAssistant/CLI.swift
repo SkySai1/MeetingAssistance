@@ -1,4 +1,5 @@
 import Foundation
+import MeetingAssistantCore
 
 struct Options: Sendable {
     var devicesOnly = false
@@ -65,5 +66,27 @@ struct Options: Sendable {
 enum Log {
     static func info(_ message: String) {
         FileHandle.standardError.write(Data((message + "\n").utf8))
+    }
+}
+
+extension Options {
+    func configuration(selected: [AudioSource: AudioDevice]) -> MeetingConfiguration {
+        var configuration = MeetingConfiguration(selected: selected)
+        configuration.captureOnly = captureOnly
+        configuration.remoteOnly = remoteOnly
+        configuration.duration = duration
+        configuration.modelPath = modelPath
+        configuration.tokenizerPath = tokenizerPath
+        configuration.thresholdDB = thresholdDB
+        configuration.debugAudioDirectory = debugAudioDirectory
+        return configuration
+    }
+}
+
+extension TranscriptEvent {
+    var terminalLine: String {
+        let milliseconds = Int((max(0, startTime) * 1000).rounded())
+        return String(format: "[%02d:%02d.%03d] [%@] %@", milliseconds / 60000,
+                      (milliseconds / 1000) % 60, milliseconds % 1000, source.rawValue, text)
     }
 }

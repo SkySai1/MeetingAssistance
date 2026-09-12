@@ -3,11 +3,11 @@ import Foundation
 import AVFoundation
 @preconcurrency import WhisperKit
 
-struct ModelPaths: Sendable {
-    let model: URL
-    let tokenizer: URL
+public struct ModelPaths: Sendable {
+    public let model: URL
+    public let tokenizer: URL
 
-    init(model: String?, tokenizer: String?) throws {
+    public init(model: String? = nil, tokenizer: String? = nil) throws {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let base = documents.appendingPathComponent("huggingface/models")
         self.model = model.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
@@ -16,12 +16,12 @@ struct ModelPaths: Sendable {
             ?? base.appendingPathComponent("openai/whisper-large-v3")
         for file in ["AudioEncoder.mlmodelc", "MelSpectrogram.mlmodelc", "TextDecoder.mlmodelc"] {
             guard FileManager.default.fileExists(atPath: self.model.appendingPathComponent(file).path) else {
-                throw MeetingError("Local model component missing: \(self.model.appendingPathComponent(file).path). Set --model-path.")
+                throw MeetingError("Local model component missing: \(self.model.appendingPathComponent(file).path)")
             }
         }
         for file in ["tokenizer.json", "tokenizer_config.json", "config.json"] {
             guard FileManager.default.fileExists(atPath: self.tokenizer.appendingPathComponent(file).path) else {
-                throw MeetingError("Local tokenizer file missing: \(self.tokenizer.appendingPathComponent(file).path). Set --tokenizer-path.")
+                throw MeetingError("Local tokenizer file missing: \(self.tokenizer.appendingPathComponent(file).path)")
             }
         }
     }

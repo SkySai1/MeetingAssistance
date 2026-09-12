@@ -3,6 +3,7 @@ import Synchronization
 import CoreML
 import Testing
 @testable import MeetingAssistant
+@testable import MeetingAssistantCore
 
 @Test func deviceSelectionSupportsLocalizedNamesAndChangingIDs() throws {
     let devices = [

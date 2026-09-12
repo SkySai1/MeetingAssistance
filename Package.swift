@@ -6,21 +6,39 @@ import PackageDescription
 let package = Package(
     name: "MeetingAssistant",
     platforms: [.macOS(.v15)],
+    products: [
+        .library(name: "MeetingAssistantCore", targets: ["MeetingAssistantCore"]),
+        .executable(name: "MeetingAssistant", targets: ["MeetingAssistant"]),
+        .executable(name: "MeetingAssistantApp", targets: ["MeetingAssistantApp"]),
+    ],
     dependencies: [
         // Homebrew's installed WhisperKit 1.1.0 uses this upstream Swift 6.3
         // MLModelAsset compatibility fix. Pin it for reproducible public APIs.
         .package(url: "https://github.com/argmaxinc/argmax-oss-swift.git", revision: "e687e26f1865e881e86be968179b13f09ec1aeea"),
     ],
     targets: [
-        // Targets are the basic building blocks of a package, defining a module or a test suite.
-        // Targets can depend on other targets in this package and products from dependencies.
+        // Preserve the existing source paths while enforcing the Core/UI boundary.
+        .target(
+            name: "MeetingAssistantCore",
+            dependencies: [.product(name: "WhisperKit", package: "argmax-oss-swift")],
+            path: "Sources/MeetingAssistant",
+            exclude: ["CLI.swift", "MeetingAssistant.swift"],
+            sources: ["Audio", "Meeting", "Transcription"]
+        ),
         .executableTarget(
             name: "MeetingAssistant",
-            dependencies: [.product(name: "WhisperKit", package: "argmax-oss-swift")]
+            dependencies: ["MeetingAssistantCore"],
+            path: "Sources/MeetingAssistant",
+            exclude: ["Audio", "Meeting", "Transcription"],
+            sources: ["CLI.swift", "MeetingAssistant.swift"]
+        ),
+        .executableTarget(
+            name: "MeetingAssistantApp",
+            dependencies: ["MeetingAssistantCore"]
         ),
         .testTarget(
             name: "MeetingAssistantTests",
-            dependencies: ["MeetingAssistant"]
+            dependencies: ["MeetingAssistantCore", "MeetingAssistant", "MeetingAssistantApp"]
         ),
     ],
     swiftLanguageModes: [.v6]
