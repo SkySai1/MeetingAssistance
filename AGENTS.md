@@ -2,34 +2,66 @@
 
 ## Project: MeetingAssistant
 
-You are implementing a local real-time meeting transcription assistant for macOS.
+You are implementing a local real-time meeting assistant for macOS.
 
-The final system will:
+The final product is a native macOS application that:
 
-1. Capture the user's microphone separately.
-2. Capture conference/system audio through BlackHole 2ch.
-3. Transcribe both sources in real time with WhisperKit.
-4. Mark the local microphone stream as `YOU`.
-5. Diarize and identify speakers in the remote stream.
-6. Maintain a timestamped meeting transcript.
-7. Feed finalized transcript events into a local LLM through Ollama.
-8. Maintain a live contextual briefing:
-   - current topic;
-   - facts;
-   - decisions;
-   - open questions;
-   - action items;
-   - owners;
-   - deadlines;
-   - useful clarification questions.
+1. Captures the user's microphone separately.
+2. Captures conference/system audio through BlackHole 2ch.
+3. Transcribes both sources in real time with WhisperKit.
+4. Marks the local microphone stream as `YOU`.
+5. Diarizes the remote stream.
+6. Identifies known speakers using stored voice profiles.
+7. Maintains a timestamped transcript.
+8. Feeds finalized transcript events into a local LLM through Ollama.
+9. Maintains a live contextual briefing.
+10. Presents all major controls and results through a native SwiftUI graphical interface.
+11. Works locally without requiring cloud transcription.
 
-The system must work locally on macOS without requiring cloud transcription.
+The system should evolve incrementally from a CLI prototype into a native macOS application.
+
+---
+
+# Product goal
+
+The final user experience should be:
+
+```text
+Open MeetingAssistant
+        ↓
+check audio / models
+        ↓
+Start Meeting
+        ↓
+live transcript
++
+speaker identification
++
+context briefing
+        ↓
+Stop Meeting
+        ↓
+summary / decisions / actions / transcript
+```
+
+The end user should not need to understand:
+
+```text
+CoreAudio
+WhisperKit internals
+FluidAudio internals
+speaker embeddings
+Ollama API
+BlackHole routing details
+```
+
+The application should expose only understandable configuration and status.
 
 ---
 
 # Current milestone
 
-Do NOT implement the complete system yet.
+Do NOT implement the complete system immediately.
 
 The current milestone is:
 
@@ -42,7 +74,7 @@ REMOTE = BlackHole 2ch
 YOU    = physical MacBook microphone
 ```
 
-Expected terminal output:
+Expected CLI output during the current milestone:
 
 ```text
 [00:03.420] REMOTE: Добрый день, коллеги.
@@ -50,7 +82,7 @@ Expected terminal output:
 [00:09.120] REMOTE: Тогда первый вопрос касается релиза.
 ```
 
-Only finalized / confirmed transcription should eventually be emitted as transcript events.
+Only finalized / confirmed transcription should become permanent transcript events.
 
 Do not send unstable partial hypotheses downstream as finalized utterances.
 
@@ -79,7 +111,7 @@ Multi-Output Device
 
 BlackHole is known to work.
 
-WhisperKit is installed and has already successfully transcribed test WAV files.
+WhisperKit has already successfully transcribed test WAV files.
 
 The WhisperKit model currently used for testing is:
 
@@ -93,27 +125,67 @@ Primary language:
 Russian
 ```
 
-Conversations can contain English technical terms.
+Conversations may contain English technical terms.
 
 ---
 
-# Important architecture constraint
+# Core architectural rule
+
+The application core MUST NOT depend on the CLI or SwiftUI layer.
+
+Architecture should conceptually be:
+
+```text
+                MeetingAssistantCore
+                        │
+        ┌───────────────┼────────────────┐
+        │               │                │
+     Audio           Speech           Meeting
+        │               │                │
+        └───────────────┼────────────────┘
+                        │
+                 application state
+                        │
+              ┌─────────┴─────────┐
+              │                   │
+             CLI                SwiftUI
+        development tool      final product
+```
+
+The CLI is a diagnostic/development interface.
+
+SwiftUI is the final user-facing interface.
+
+Do not place business logic directly inside SwiftUI views.
+
+Do not make audio/transcription components depend on SwiftUI types.
+
+---
+
+# Important audio architecture constraint
 
 Never mix the microphone and remote conference audio before transcription.
 
 They must remain two independent logical streams:
 
 ```text
-                    ┌── WhisperKit ──> YOU
-MacBook Microphone ─┤
+MacBook Microphone
+        ↓
+    WhisperKit
+        ↓
+       YOU
 
-                    ┌── WhisperKit ──> REMOTE
-BlackHole 2ch ──────┤
+
+BlackHole 2ch
+        ↓
+    WhisperKit
+        ↓
+     REMOTE
 ```
 
 This is intentional.
 
-Because the local microphone is isolated, anything coming from that source can automatically be assigned:
+Because the local microphone is isolated, anything captured from that source can automatically be assigned:
 
 ```text
 speaker = YOU
@@ -121,11 +193,11 @@ speaker = YOU
 
 No speaker recognition is needed for the local microphone.
 
-Speaker diarization will later be applied ONLY to the `REMOTE` stream.
+Speaker diarization and identification will later be applied ONLY to the `REMOTE` stream.
 
 ---
 
-# Audio requirements
+# Audio device handling
 
 Prefer native macOS APIs:
 
@@ -138,20 +210,18 @@ Audio devices must be selected explicitly by device ID.
 
 Do not rely on changing the global macOS default input device.
 
-The application should discover available audio devices and identify at minimum:
+The application must discover available audio devices and identify at minimum:
 
 ```text
 BlackHole 2ch
 MacBook microphone
 ```
 
-Do not hardcode numeric AudioDeviceID values because they may change after reboot or reconnection.
+Do not hardcode numeric AudioDeviceID values.
 
-Resolve devices by name and retain the resulting AudioDeviceID.
+Resolve devices by name and retain their AudioDeviceID.
 
-Provide useful diagnostic output when devices are enumerated.
-
-Example:
+Example diagnostics:
 
 ```text
 Audio devices:
@@ -165,21 +235,23 @@ YOU    -> 65
 REMOTE -> 72
 ```
 
-If a requested device cannot be found, fail with a clear error.
+If a required device cannot be found, fail with a clear error.
+
+Never silently substitute another device.
 
 ---
 
 # Audio format
 
-The macOS capture side may operate at the device's native sample rate, typically:
+The capture side may operate at the device's native sample rate, usually:
 
 ```text
 48 kHz
 ```
 
-Do not unnecessarily force the hardware device itself to 16 kHz.
+Do not unnecessarily force hardware to 16 kHz.
 
-Perform conversion/resampling only where required by the transcription pipeline.
+Perform resampling only where required.
 
 Internally prefer:
 
@@ -188,15 +260,15 @@ Float32 PCM
 mono for ASR
 ```
 
-Do not introduce lossy codecs anywhere in the live processing pipeline.
+Do not introduce lossy codecs in the live pipeline.
 
 ---
 
 # Clock and timestamps
 
-Every captured audio stream must use a monotonic timeline.
+Every captured stream must use a monotonic timeline.
 
-Transcript events need timestamps relative to meeting start.
+Transcript events must contain timestamps relative to meeting start.
 
 Example:
 
@@ -209,11 +281,9 @@ Example:
 }
 ```
 
-Do not use wall-clock time as the primary synchronization mechanism between audio streams.
+Do not use wall-clock time as the primary synchronization mechanism.
 
-Use a monotonic clock.
-
-The eventual system must allow transcript events from the two audio sources to be merged chronologically.
+The system must allow events from YOU and REMOTE to be merged chronologically.
 
 ---
 
@@ -223,39 +293,35 @@ Use WhisperKit as the ASR engine.
 
 Do not invent WhisperKit APIs.
 
-IMPORTANT:
-
 Before implementing an API call:
 
-1. Inspect the actual WhisperKit / argmax-oss-swift source version resolved by Swift Package Manager.
+1. Inspect the actual resolved version of WhisperKit / argmax-oss-swift.
 2. Verify the exact public API.
-3. Prefer existing public APIs over copying internal WhisperKit implementation.
-4. Do not assume examples found in old WhisperKit releases still match the current package.
+3. Prefer public APIs over copied internal implementation.
+4. Do not assume old examples still match the current package.
 
-If `AudioStreamTranscriber`, `AudioProcessor`, `WhisperKit`, or device-selection APIs differ from expectations, adapt to the actual resolved version.
+If APIs differ from expectations, adapt to the resolved source.
 
-Do not silently work around API incompatibilities.
-
-Document significant compatibility decisions in code comments.
+Document major compatibility decisions.
 
 ---
 
 # Streaming transcription behavior
 
-The live transcription pipeline should distinguish between:
+The pipeline must distinguish:
 
 ```text
 partial / unconfirmed
 confirmed / finalized
 ```
 
-Partial text may be displayed for diagnostics.
+Partial text may be displayed temporarily.
 
-Only confirmed/finalized text should become permanent transcript events.
+Only confirmed/finalized text becomes a permanent transcript event.
 
-Avoid emitting the same finalized segment multiple times.
+Avoid duplicate finalized segments.
 
-Each emitted transcript event must have at least:
+Each event must have at least:
 
 ```swift
 source
@@ -264,7 +330,7 @@ endTime
 text
 ```
 
-Suggested logical model:
+Suggested model:
 
 ```swift
 enum AudioSource {
@@ -280,7 +346,7 @@ struct TranscriptEvent {
 }
 ```
 
-Exact implementation may differ if there is a good reason.
+Exact implementation may differ if justified.
 
 ---
 
@@ -288,9 +354,9 @@ Exact implementation may differ if there is a good reason.
 
 The microphone and BlackHole pipelines must run concurrently.
 
-Do not serialize them such that transcription of one source blocks capture of the other.
+Do not serialize them.
 
-Prefer modern Swift concurrency:
+Prefer:
 
 ```text
 async/await
@@ -301,25 +367,23 @@ AsyncStream
 
 where appropriate.
 
-Avoid unnecessarily complex concurrency abstractions.
+Protect shared transcript state from data races.
 
-Protect mutable shared transcript state from data races.
+Realtime audio callbacks must remain lightweight.
 
-The audio callback itself must remain lightweight.
-
-Do not perform expensive model inference directly inside a realtime CoreAudio callback.
+Do not perform expensive model inference directly inside a CoreAudio callback.
 
 ---
 
 # Backpressure
 
-The capture layer must remain stable if transcription briefly runs slower than realtime.
+The capture layer must remain stable if transcription is briefly slower than realtime.
 
 Use bounded buffering where appropriate.
 
 Do not allow unlimited memory growth.
 
-If the pipeline cannot keep up, report this clearly in logs.
+If the pipeline falls behind, expose this clearly in logs and later in the UI.
 
 Do not silently discard large amounts of audio.
 
@@ -327,11 +391,9 @@ Do not silently discard large amounts of audio.
 
 # Logging
 
-For now the application is a CLI tool.
+During development, the CLI must provide useful diagnostics.
 
-Logs should make troubleshooting simple.
-
-Recommended startup diagnostics:
+Example startup:
 
 ```text
 MeetingAssistant starting...
@@ -351,46 +413,712 @@ REMOTE stream ready
 Transcription started.
 ```
 
-Transcript output should remain visually distinct from diagnostic logs.
-
-Example:
+Transcript output:
 
 ```text
 [00:14.220] [YOU]    Когда будет готов документ?
 [00:17.830] [REMOTE] Ориентировочно в пятницу.
 ```
 
+Logging infrastructure should later also feed user-friendly SwiftUI status indicators.
+
 ---
 
-# Project structure
+# Speaker diarization — later phase
 
-Prefer a small modular structure such as:
+After dual-stream ASR is stable, process only the REMOTE stream with FluidAudio.
+
+Desired conceptual result:
+
+```text
+REMOTE speaker_1
+REMOTE speaker_2
+REMOTE speaker_3
+```
+
+Speaker diarization answers:
+
+```text
+who spoke when?
+```
+
+It does not assign real human identities by itself.
+
+---
+
+# Speaker identification — later phase
+
+Known speakers will have voice profiles.
+
+Conceptual enrollment:
+
+```text
+voice samples
+    ↓
+speaker embeddings
+    ↓
+profile centroid
+    ↓
+VoiceProfile("Алексей")
+```
+
+During a meeting:
+
+```text
+speaker segment
+      ↓
+embedding
+      ↓
+compare with profiles
+      ↓
+speaker identity
+```
+
+Do not use the LLM to determine speaker identity.
+
+Speaker identification must remain an audio-model responsibility.
+
+---
+
+# Speaker confidence policy
+
+Do not treat embedding similarity as a calibrated probability.
+
+Store the raw similarity separately.
+
+Suggested model:
+
+```swift
+enum SpeakerMatchState {
+    case known
+    case uncertain
+    case unknown
+}
+```
+
+Transcript events may later contain:
+
+```swift
+speakerID: String?
+speakerName: String?
+speakerSimilarity: Double?
+speakerMatchState: SpeakerMatchState
+```
+
+Use configurable thresholds:
+
+```text
+HIGH_THRESHOLD
+LOW_THRESHOLD
+```
+
+Decision logic:
+
+```text
+similarity >= HIGH_THRESHOLD
+    -> known speaker
+
+LOW_THRESHOLD <= similarity < HIGH_THRESHOLD
+    -> uncertain speaker
+
+similarity < LOW_THRESHOLD
+    -> unknown speaker
+```
+
+Never automatically assign a known human identity below the high-confidence threshold.
+
+Never automatically update a voice profile from an uncertain match.
+
+Voice profiles may be updated only from:
+
+- manually confirmed assignments;
+- or explicitly enabled very-high-confidence samples.
+
+Do not hardcode universal threshold values.
+
+They must be calibrated on real meeting audio.
+
+---
+
+# Speaker correction UX — later GUI phase
+
+The user must be able to correct unknown or incorrect speakers.
+
+Example:
+
+```text
+Unknown-3
+"Я согласую это с заказчиком."
+
+[ Assign speaker ]
+```
+
+The user may choose:
+
+```text
+Максим
+```
+
+This correction should:
+
+1. update affected transcript events;
+2. optionally add confirmed audio embeddings to Максим's voice profile;
+3. never silently alter historical identities without user confirmation.
+
+---
+
+# Transcript store
+
+Once live transcription and speaker identification are stable, introduce persistent meeting storage.
+
+Preferred first implementation:
+
+```text
+SQLite
+```
+
+Store at minimum:
+
+```text
+meeting
+utterance
+speaker
+voice profile
+context snapshot
+```
+
+A transcript event should conceptually contain:
+
+```json
+{
+  "id": "utt_00482",
+  "start": 317.4,
+  "end": 322.8,
+  "source": "REMOTE",
+  "speakerId": "alexey",
+  "speakerName": "Алексей",
+  "speakerSimilarity": 0.91,
+  "text": "Тогда релиз переносим на следующую неделю."
+}
+```
+
+---
+
+# Ollama integration
+
+Ollama is a later analysis layer.
+
+It must NOT receive raw audio.
+
+Pipeline:
+
+```text
+audio
+  ↓
+WhisperKit / FluidAudio
+  ↓
+TranscriptEvent
+  ↓
+Ollama / Qwen
+```
+
+Communication should happen locally through:
+
+```text
+http://127.0.0.1:11434
+```
+
+The application must remain useful when Ollama is unavailable.
+
+For example:
+
+```text
+Transcription      AVAILABLE
+Speaker ID         AVAILABLE
+AI Context         UNAVAILABLE
+```
+
+Ollama failure must never stop audio capture or transcription.
+
+---
+
+# Context engine
+
+Do not resend the full transcript to the LLM every time.
+
+Use incremental structured state:
+
+```text
+previous state
++
+new finalized events
+=
+new state
+```
+
+Desired structure:
+
+```json
+{
+  "topic": null,
+  "facts": [],
+  "decisions": [],
+  "openQuestions": [],
+  "actions": []
+}
+```
+
+Typical update interval:
+
+```text
+30–60 seconds
+```
+
+Do not invoke the LLM for every token or partial ASR result.
+
+Use finalized events only.
+
+Where possible, retain source event IDs so context items can be traced back to the transcript.
+
+Example:
+
+```json
+{
+  "decisions": [
+    {
+      "text": "Перенести релиз на следующую неделю",
+      "sourceIds": ["utt_00482"]
+    }
+  ]
+}
+```
+
+---
+
+# LLM grounding rule
+
+The LLM must never silently override factual pipeline outputs.
+
+For example:
+
+Bad:
+
+```text
+audio layer -> Unknown-2
+LLM decides -> "probably Максим"
+```
+
+Good:
+
+```text
+audio layer -> Unknown-2
+LLM sees -> Unknown-2
+```
+
+Speaker identity can only be corrected by:
+
+```text
+speaker matching logic
+or
+explicit user correction
+```
+
+The same principle applies to transcript text.
+
+---
+
+# SwiftUI graphical interface
+
+The final product MUST include a native macOS SwiftUI interface.
+
+Do not build the final product as a web application unless explicitly requested.
+
+The SwiftUI layer must consume state produced by MeetingAssistantCore.
+
+Do not place audio capture, model inference, persistence, or Ollama networking directly in SwiftUI views.
+
+Use observable view models or application state adapters.
+
+---
+
+# Main GUI layout
+
+The primary meeting screen should conceptually contain:
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│ MeetingAssistant                     ● 00:43:12    [Stop]  │
+├─────────────────────────────┬───────────────────────────────┤
+│ LIVE TRANSCRIPT             │ CONTEXT                       │
+│                             │                               │
+│ Алексей  12:31              │ Current topic                 │
+│ Релиз нужно перенести...    │ Перенос релиза                │
+│                             │                               │
+│ YOU  12:31                  │ Decisions                     │
+│ На какую дату?              │ • перенос на след. неделю     │
+│                             │                               │
+│ Unknown-3  12:32            │ Action items                  │
+│ Я уточню у заказчика.       │ • уточнить дату               │
+│ [Assign speaker ▼]          │                               │
+│                             │ Open questions                │
+│                             │ • точная дата релиза          │
+├─────────────────────────────┴───────────────────────────────┤
+│ Mic ●  BlackHole ●  Whisper ●  Diarization ●  Ollama ●    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+This is conceptual, not a strict pixel-perfect requirement.
+
+---
+
+# GUI screens
+
+The application roadmap should include at minimum the following screens or panels.
+
+## 1. Start / Home
+
+Purpose:
+
+- system readiness;
+- start a meeting;
+- select basic sources;
+- surface missing dependencies.
+
+Example:
+
+```text
+Microphone      MacBook Pro Microphone       ✓
+Remote audio    BlackHole 2ch                 ✓
+WhisperKit      Ready                         ✓
+Diarization     Ready                         ✓
+Ollama          qwen3.x                       ✓
+
+[ Start Meeting ]
+```
+
+---
+
+## 2. Live Meeting
+
+Main operational screen.
+
+Must show:
+
+- meeting timer;
+- Start / Stop / Pause controls;
+- live transcript;
+- current speaker;
+- partial/finalized visual distinction if useful;
+- contextual briefing;
+- system status;
+- speaker correction actions.
+
+---
+
+## 3. Audio Settings
+
+Must allow:
+
+- selecting local microphone;
+- selecting BlackHole / remote source;
+- seeing live input levels;
+- detecting missing BlackHole;
+- refreshing the device list.
+
+Show clear level indicators:
+
+```text
+YOU       ███████░░░
+REMOTE    █████░░░░░
+```
+
+Do not expose raw AudioDeviceID values as the primary user interface.
+
+---
+
+## 4. Speaker Profiles
+
+Must allow:
+
+- viewing known speakers;
+- creating a speaker profile;
+- renaming a profile;
+- deleting a profile;
+- enrolling new voice samples;
+- reviewing profile sample count;
+- manually assigning Unknown speakers during or after a meeting.
+
+Potential layout:
+
+```text
+Алексей
+Samples: 5
+Last confirmed: today
+
+Лариса
+Samples: 4
+Last confirmed: 3 days ago
+
+[ Add speaker ]
+```
+
+---
+
+## 5. AI / Ollama Settings
+
+Must show:
+
+```text
+Ollama status
+selected model
+connection status
+context update interval
+```
+
+Allow selecting an available local model.
+
+Do not require Ollama for transcription.
+
+---
+
+## 6. Meeting History
+
+Later phase.
+
+Show saved meetings:
+
+```text
+12 Sep 2026 14:00
+Release planning
+
+11 Sep 2026 10:30
+UX agency review
+```
+
+Opening a meeting should display:
+
+- transcript;
+- summary;
+- decisions;
+- action items;
+- participants;
+- contextual timeline.
+
+---
+
+# Meeting controls
+
+The final GUI must include:
+
+```text
+Start
+Pause
+Resume
+Stop
+```
+
+Pause means:
+
+- stop storing/transcribing new meeting audio;
+- retain current session state;
+- continue when resumed.
+
+Do not use Pause merely as a UI state while still recording audio.
+
+---
+
+# Start Meeting behavior
+
+When the user clicks Start Meeting:
+
+1. Verify microphone is available.
+2. Verify REMOTE source is available.
+3. Verify WhisperKit model is ready.
+4. Start the meeting monotonic clock.
+5. Start both capture pipelines.
+6. Start live transcription.
+7. If diarization is enabled, start it for REMOTE.
+8. If Ollama is available, start context updates.
+9. Transition UI to Live Meeting.
+
+Do not silently start with a missing critical audio source.
+
+---
+
+# Stop Meeting behavior
+
+When the user clicks Stop Meeting:
+
+1. stop audio capture;
+2. flush pending finalized ASR;
+3. finalize diarization;
+4. persist remaining transcript events;
+5. optionally request final context/summary from Ollama;
+6. close meeting session cleanly;
+7. show saved meeting result.
+
+---
+
+# Application status model
+
+The GUI should expose component state.
+
+Example:
+
+```swift
+enum ComponentStatus {
+    case unavailable
+    case loading
+    case ready
+    case degraded
+    case failed(String)
+}
+```
+
+Conceptually track:
+
+```text
+microphone
+remoteAudio
+whisper
+diarization
+speakerProfiles
+ollama
+storage
+```
+
+This lets the GUI show:
+
+```text
+Whisper      ● Ready
+BlackHole    ● Ready
+Ollama       ○ Offline
+```
+
+without embedding system logic inside the view.
+
+---
+
+# Error UX
+
+Do not show only raw Swift errors to the user.
+
+Translate common failures into understandable messages.
+
+Example:
+
+Bad:
+
+```text
+kAudioHardwareBadDeviceError -2000
+```
+
+Good:
+
+```text
+BlackHole 2ch is no longer available.
+
+Check Audio MIDI Setup or reconnect the audio device.
+```
+
+Detailed technical information may be available under:
+
+```text
+Show details
+```
+
+for debugging.
+
+---
+
+# Privacy UI
+
+The application is designed for local processing.
+
+The UI should make this visible.
+
+Example:
+
+```text
+Processing: Local
+Cloud transcription: Off
+```
+
+Do not add telemetry, cloud logging, remote analytics, or remote speech APIs unless explicitly requested.
+
+---
+
+# Application lifecycle
+
+The application should behave like a native macOS application.
+
+Later GUI milestones may add:
+
+```text
+menu bar status
+dock app
+notifications
+restore previous window state
+```
+
+Do not implement these before the primary meeting workflow is stable.
+
+---
+
+# Proposed project structure
+
+Prefer a modular structure similar to:
 
 ```text
 MeetingAssistant/
 ├── Package.swift
 ├── AGENTS.md
-└── Sources/
-    └── MeetingAssistant/
-        ├── main.swift
-        ├── Audio/
-        │   ├── AudioDeviceManager.swift
-        │   ├── AudioCapture.swift
-        │   └── AudioSource.swift
-        ├── Transcription/
-        │   ├── WhisperTranscriber.swift
-        │   └── TranscriptEvent.swift
-        └── Meeting/
-            └── MeetingSession.swift
+├── README.md
+│
+├── Sources/
+│   ├── MeetingAssistantCore/
+│   │   ├── Audio/
+│   │   │   ├── AudioDeviceManager.swift
+│   │   │   ├── AudioCapture.swift
+│   │   │   └── AudioSource.swift
+│   │   │
+│   │   ├── Transcription/
+│   │   │   ├── WhisperTranscriber.swift
+│   │   │   └── TranscriptEvent.swift
+│   │   │
+│   │   ├── Speakers/
+│   │   │   ├── SpeakerDiarizer.swift
+│   │   │   ├── VoiceProfile.swift
+│   │   │   └── SpeakerMatcher.swift
+│   │   │
+│   │   ├── Meeting/
+│   │   │   ├── MeetingSession.swift
+│   │   │   └── MeetingState.swift
+│   │   │
+│   │   ├── Context/
+│   │   │   ├── OllamaClient.swift
+│   │   │   └── ContextEngine.swift
+│   │   │
+│   │   └── Storage/
+│   │       └── MeetingStore.swift
+│   │
+│   ├── MeetingAssistantCLI/
+│   │   └── main.swift
+│   │
+│   └── MeetingAssistantApp/
+│       ├── MeetingAssistantApp.swift
+│       ├── Views/
+│       ├── ViewModels/
+│       └── Settings/
 ```
 
-Do not create abstractions merely for architectural appearance.
+Exact structure may evolve.
 
-Keep the project easy to understand and debug.
+Do not create empty abstractions merely to match this tree.
 
 ---
 
-# Implementation order
+# Implementation roadmap
 
 Work incrementally.
 
@@ -404,7 +1132,7 @@ Acceptance criteria:
 swift run
 ```
 
-shows BlackHole and the microphone and resolves their IDs.
+shows BlackHole and microphone and resolves their IDs.
 
 Do not continue until this works.
 
@@ -423,39 +1151,27 @@ REMOTE
 
 independently.
 
-For debugging, optionally calculate RMS/peak levels.
-
-Example:
-
-```text
-YOU    level: -27 dB
-REMOTE level: -14 dB
-```
+Optionally calculate RMS / peak levels.
 
 Acceptance criteria:
 
-- speaking into the microphone changes only the YOU level significantly;
-- playing system audio changes the REMOTE level;
-- both streams can run simultaneously for several minutes;
-- there are no obvious dropouts or audio-buffer errors.
+- speaking into the microphone changes YOU level;
+- playing system audio changes REMOTE level;
+- both run simultaneously;
+- no obvious buffer failures.
 
 ---
 
 ## Phase 3 — Single-stream live WhisperKit
 
-Connect ONE live source to WhisperKit first.
-
-Start with:
-
-```text
-REMOTE / BlackHole
-```
+Connect REMOTE / BlackHole to WhisperKit.
 
 Acceptance criteria:
 
-- system audio produces live Russian transcription;
+- live Russian transcription;
 - continuous speech works for several minutes;
-- finalized segments are emitted without excessive duplicates.
+- finalized segments are stable;
+- no excessive duplication.
 
 ---
 
@@ -472,41 +1188,204 @@ YOU    -> WhisperKit
 
 run simultaneously.
 
-Terminal should produce chronologically timestamped output.
-
-Example:
-
-```text
-[00:05.100] [REMOTE] Коллеги, всем добрый день.
-[00:08.320] [YOU] Добрый день.
-[00:10.870] [REMOTE] Давайте начнем.
-```
+Terminal output is timestamped and chronological.
 
 ---
 
-## Phase 5 — Stability
+## Phase 5 — ASR stability
 
-Run a longer test.
-
-Target:
+Run:
 
 ```text
-30–60 minutes
+30–60 minute test
 ```
 
 Check:
 
 - memory does not continuously grow;
-- no growing transcription delay;
+- no steadily increasing latency;
 - no repeated finalized segments;
-- no dropped audio caused by blocked callbacks;
-- both streams remain synchronized sufficiently for meeting transcription.
-
-Only after this phase succeeds should diarization be added.
+- no blocked capture callbacks;
+- streams remain sufficiently synchronized.
 
 ---
 
-# Explicitly out of scope for the current milestone
+## Phase 6 — Core/UI separation
+
+Before adding the full GUI:
+
+- move reusable business logic into `MeetingAssistantCore`;
+- keep CLI as a thin adapter;
+- expose observable application/session state;
+- make sure core components do not import SwiftUI.
+
+Acceptance criteria:
+
+- the same MeetingSession can be started from CLI or another frontend;
+- audio/transcription functionality works without UI code.
+
+---
+
+## Phase 7 — Basic SwiftUI shell
+
+Create native macOS SwiftUI application.
+
+Implement:
+
+```text
+Home
+Audio Settings
+Live Meeting
+```
+
+At this stage, reuse existing core functionality.
+
+Do not duplicate transcription logic inside SwiftUI.
+
+Acceptance criteria:
+
+- app launches natively;
+- audio devices are shown;
+- Start Meeting works;
+- Stop Meeting works;
+- live transcript appears in GUI;
+- YOU and REMOTE are visually distinguishable.
+
+---
+
+## Phase 8 — FluidAudio diarization
+
+Add diarization ONLY to REMOTE.
+
+Acceptance criteria:
+
+```text
+REMOTE -> speaker_1
+REMOTE -> speaker_2
+...
+```
+
+with usable timestamps.
+
+Expose diarization state in GUI.
+
+---
+
+## Phase 9 — Voice profiles and identification
+
+Implement:
+
+```text
+speaker embeddings
+voice profiles
+speaker matching
+confidence policy
+unknown speakers
+manual corrections
+```
+
+Acceptance criteria:
+
+- known speakers can be enrolled;
+- known voices can be matched;
+- uncertain voices remain uncertain;
+- unknown speakers are not falsely forced to known names;
+- user can manually assign speakers in GUI.
+
+---
+
+## Phase 10 — Persistent transcript storage
+
+Add SQLite or equivalent local persistence.
+
+Persist:
+
+```text
+meetings
+transcript events
+speakers
+voice profiles
+```
+
+GUI should support basic meeting history.
+
+---
+
+## Phase 11 — Ollama integration
+
+Add local Ollama client.
+
+Acceptance criteria:
+
+- detect Ollama availability;
+- select local model;
+- send only finalized transcript events;
+- context failure does not stop transcription.
+
+---
+
+## Phase 12 — Live contextual briefing
+
+Implement structured state:
+
+```text
+topic
+facts
+decisions
+open questions
+actions
+owners
+deadlines
+```
+
+Refresh incrementally.
+
+Display in the Live Meeting GUI.
+
+---
+
+## Phase 13 — Full meeting result
+
+After Stop:
+
+generate/display:
+
+```text
+full transcript
+summary
+decisions
+action items
+open questions
+participants
+timeline
+```
+
+Support export later.
+
+---
+
+## Phase 14 — GUI refinement
+
+Improve:
+
+```text
+speaker management
+meeting history
+settings
+error states
+loading states
+audio meters
+confidence display
+pause/resume
+model management
+keyboard shortcuts
+```
+
+Only after the core workflow is stable.
+
+---
+
+# Explicitly out of scope for the CURRENT milestone
 
 Do NOT yet implement:
 
@@ -516,161 +1395,23 @@ speaker diarization
 speaker embeddings
 speaker identification
 voice profiles
-SQLite persistence
+SQLite
 Ollama
 Qwen
 RAG
-contextual briefing
-meeting summary
-action-item extraction
-GUI
-menu bar application
-network APIs
+context briefing
+full SwiftUI UI
+menu bar integration
 cloud services
 ```
 
-These belong to later milestones.
-
-Do not introduce them prematurely.
-
----
-
-# Future architecture
-
-After dual-stream ASR is stable, the intended pipeline becomes:
-
-```text
-                              ┌── WhisperKit ─────────────┐
-MacBook microphone ───────────┤                           ├── YOU events
-                              └───────────────────────────┘
-
-
-                              ┌── WhisperKit ─────────────┐
-BlackHole ────────────────────┤                           ├── text
-                              └───────────────────────────┘
-                                         +
-                              ┌── FluidAudio ─────────────┐
-BlackHole ────────────────────┤                           ├── speaker
-                              └───────────────────────────┘
-                                         │
-                                         ▼
-                                  Timeline merger
-                                         │
-                                         ▼
-                                   Transcript store
-                                         │
-                                         ▼
-                                    Ollama / Qwen
-                                         │
-                                         ▼
-                              Live contextual briefing
-```
-
----
-
-# Speaker diarization — later phase
-
-The `REMOTE` stream will later be passed through FluidAudio.
-
-Desired conceptual result:
-
-```text
-REMOTE speaker_1 -> Алексей
-REMOTE speaker_2 -> Лариса
-REMOTE speaker_3 -> Unknown-3
-```
-
-The application will eventually maintain voice embeddings/profiles so the same person can be recognized across meetings.
-
-Do not implement this yet.
-
-However, avoid architecture choices that would make access to the original REMOTE audio stream difficult later.
-
----
-
-# Context engine — later phase
-
-Confirmed transcript events will eventually be sent to a local LLM using Ollama.
-
-The LLM must NOT receive the entire meeting transcript on every update.
-
-The intended approach is:
-
-```text
-previous structured state
-+
-new finalized transcript events
-=
-new structured state
-```
-
-Future state example:
-
-```json
-{
-  "topic": "Перенос релиза",
-  "facts": [],
-  "decisions": [],
-  "open_questions": [],
-  "actions": []
-}
-```
-
-The contextual state will normally be refreshed approximately every 30–60 seconds rather than after every token.
-
-Do not implement this yet.
-
----
-
-# Privacy
-
-The application is intended for local processing.
-
-Do not introduce:
-
-```text
-cloud transcription
-remote analytics
-telemetry
-remote logging
-external speech APIs
-```
-
-unless explicitly requested.
-
-Audio and transcript data should remain local.
-
----
-
-# Error handling
-
-Prefer explicit failure to silent fallback.
-
-Examples:
-
-Bad:
-
-```text
-BlackHole not found -> silently use default microphone
-```
-
-Good:
-
-```text
-ERROR: Required audio device "BlackHole 2ch" was not found.
-
-Available input devices:
-- MacBook Pro Microphone
-- External USB Microphone
-```
-
-Never accidentally substitute the microphone for BlackHole or vice versa.
+They are in the roadmap, but not part of the current audio/ASR milestone.
 
 ---
 
 # Development rules
 
-After each meaningful change:
+After meaningful changes:
 
 ```bash
 swift build
@@ -684,62 +1425,86 @@ Before considering a phase complete:
 swift run
 ```
 
-and perform the relevant real audio test.
+or launch the SwiftUI target for GUI phases.
 
-Do not make large unrelated refactors while fixing a small issue.
+Perform the relevant real audio test.
 
-Keep commits/changes conceptually focused.
+Do not make large unrelated refactors while fixing a focused issue.
 
-If an implementation decision depends on an uncertain macOS or WhisperKit behavior, inspect the corresponding framework/package source instead of guessing.
+If a decision depends on uncertain macOS, WhisperKit, FluidAudio, or Ollama behavior, inspect the real API/source instead of guessing.
 
 ---
 
-# Documentation
+# README
 
 Keep `README.md` updated with:
 
 1. prerequisites;
 2. BlackHole setup;
 3. Multi-Output Device setup;
-4. build command;
-5. run command;
-6. expected device names;
-7. troubleshooting.
+4. build instructions;
+5. run instructions;
+6. expected devices;
+7. current supported features;
+8. troubleshooting.
 
-Do not duplicate the full internal architecture in README.
-
-`AGENTS.md` is the engineering instruction source.
+Once the GUI exists, README should describe the normal user workflow instead of assuming CLI usage.
 
 ---
 
-# Definition of Done for current milestone
+# Definition of Done — current milestone
 
-The current milestone is complete only when all of the following work:
+Current audio/ASR milestone is complete only when:
 
 ```text
-✓ BlackHole is discovered programmatically
-✓ MacBook microphone is discovered programmatically
-✓ both devices are opened simultaneously
+✓ BlackHole discovered programmatically
+✓ MacBook microphone discovered programmatically
+✓ both devices opened simultaneously
 ✓ both streams remain separate
-✓ both streams can be captured continuously
+✓ both streams captured continuously
 ✓ WhisperKit transcribes REMOTE live
 ✓ WhisperKit transcribes YOU live
-✓ YOU events are tagged YOU
-✓ REMOTE events are tagged REMOTE
-✓ finalized segments are not repeatedly emitted
+✓ YOU events tagged YOU
+✓ REMOTE events tagged REMOTE
+✓ finalized segments are not duplicated
 ✓ events contain timestamps
-✓ terminal output merges events chronologically
-✓ application runs without changing global macOS input device
+✓ events merge chronologically
+✓ application does not change global macOS input device
 ✓ several-minute test works without growing delay
 ```
 
-Do not proceed to speaker diarization until these requirements are satisfied.
+Do not proceed to diarization until this is stable.
+
+---
+
+# Definition of Done — final product
+
+The product is considered functionally complete when:
+
+```text
+✓ native SwiftUI macOS application exists
+✓ user can select microphone and remote audio source
+✓ user can Start / Pause / Resume / Stop a meeting
+✓ YOU and REMOTE are captured independently
+✓ WhisperKit transcribes both live
+✓ REMOTE is diarized
+✓ known voices can be identified
+✓ uncertain/unknown voices are handled safely
+✓ speaker identity can be corrected in GUI
+✓ transcript is persisted locally
+✓ Ollama can generate live context
+✓ Ollama failure does not interrupt transcription
+✓ decisions and actions link back to transcript sources
+✓ meetings can be reopened from history
+✓ final transcript and summary are available after Stop
+✓ processing remains local
+```
 
 ---
 
 # Guiding principle
 
-Build the pipeline from the bottom up:
+Build the system from the bottom up:
 
 ```text
 audio correctness
@@ -748,15 +1513,21 @@ stable capture
     ↓
 stable transcription
     ↓
+Core/UI separation
+    ↓
+basic GUI
+    ↓
 speaker diarization
     ↓
 speaker identification
     ↓
 persistent transcript
     ↓
-LLM context
+Ollama context
     ↓
-user interface
+full GUI workflow
 ```
 
-If a lower layer is unstable, do not hide the problem with logic in a higher layer.
+Never hide instability in a lower layer with logic in a higher layer.
+
+The final product should feel simple even though the internal pipeline is complex.
