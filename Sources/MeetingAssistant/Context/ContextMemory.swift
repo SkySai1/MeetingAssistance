@@ -8,13 +8,16 @@ struct ContextInputEvent: Codable, Sendable, Equatable {
     let endTime: Double
     let text: String
     let kind: String
+    let speakerIDs: [String]?
     init(_ event: TranscriptEvent) {
         id = event.id; source = event.source.rawValue; startTime = event.startTime
         endTime = event.endTime; text = event.text; kind = "transcript"
+        speakerIDs = event.speakerIDs
     }
     init(_ message: ContextMessage) {
         id = message.id; source = "USER_NOTE"; startTime = message.time
         endTime = message.time; text = message.text; kind = "userNote"
+        speakerIDs = nil
     }
 }
 

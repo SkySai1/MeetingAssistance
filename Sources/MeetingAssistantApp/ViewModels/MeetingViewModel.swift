@@ -13,6 +13,7 @@ final class SessionMailbox: Sendable {
         var metrics: [AudioSource: AudioMetrics] = [:]
         var events: [TranscriptEvent] = []
         var diagnostics: [String] = []
+        var diarization: [AudioSource: DiarizationState] = [:]
     }
     private let pending = Mutex(Batch())
 
@@ -33,7 +34,8 @@ final class SessionMailbox: Sendable {
                     }
                     $0.events.append(event)
                 }
-            }
+            },
+            diarization: { state in self.pending.withLock { $0.diarization[state.source] = state } }
         )
     }
 
@@ -70,6 +72,13 @@ final class MeetingViewModel: ObservableObject {
     @Published var contextMessage = ""
     @Published private(set) var contextMessageError: String?
     @Published private(set) var isSendingContextMessage = false
+    @Published var diarizationConfiguration: DiarizationConfiguration {
+        didSet { do { try diarizationConfiguration.save() } catch { diarizationError = "Не удалось сохранить настройки диаризации: \(error)" } }
+    }
+    @Published private(set) var diarizationStates: [AudioSource: DiarizationState] = [:]
+    @Published private(set) var diarizationModelReady = DiarizationModels.isReady
+    @Published private(set) var isPreparingDiarization = false
+    @Published private(set) var diarizationError: String?
     let aiSettings: AISettingsViewModel
 
     private let preferences: UserDefaults
@@ -81,6 +90,11 @@ final class MeetingViewModel: ObservableObject {
     init(preferences: UserDefaults = .standard) {
         self.preferences = preferences
         aiSettings = AISettingsViewModel(preferences: preferences)
+        do { diarizationConfiguration = try DiarizationConfiguration.load() }
+        catch {
+            diarizationConfiguration = DiarizationConfiguration()
+            diarizationError = "Не удалось прочитать настройки диаризации: \(error)"
+        }
         modelPath = preferences.string(forKey: "modelPath") ?? ""
         tokenizerPath = preferences.string(forKey: "tokenizerPath") ?? ""
         refresh()
@@ -157,8 +171,9 @@ final class MeetingViewModel: ObservableObject {
         guard !isBusy, inputsReady, audioTest || modelReady else { return }
         isBusy = true; isAudioTest = audioTest; stopPending = false
         phase = .preparing; lastActivePhase = .preparing; errorMessage = nil; errorDetails = ""
-        metrics = [:]; diagnostics = []
+        metrics = [:]; diagnostics = []; diarizationStates = [:]
         let ai = !audioTest && aiSettings.enabled ? aiSettings.configuration : nil
+        let diarization = diarizationConfiguration
         if !audioTest {
             transcript = []; elapsed = 0; hasMeeting = true
             aiWasEnabled = ai != nil; aiState = AIState(); focusedEventID = nil
@@ -166,10 +181,10 @@ final class MeetingViewModel: ObservableObject {
         }
         // Mark busy before permission/model loading so repeated clicks cannot start
         // overlapping sessions. Stop is also valid while permission is pending.
-        runTask = Task { await performRun(audioTest: audioTest, ai: ai) }
+        runTask = Task { await performRun(audioTest: audioTest, ai: ai, diarization: diarization) }
     }
 
-    private func performRun(audioTest: Bool, ai: AIConfiguration?) async {
+    private func performRun(audioTest: Bool, ai: AIConfiguration?, diarization: DiarizationConfiguration) async {
         defer {
             session = nil; runTask = nil; isBusy = false; stopPending = false
             metrics = [:]
@@ -198,6 +213,7 @@ final class MeetingViewModel: ObservableObject {
             configuration.modelPath = modelPath.isEmpty ? nil : modelPath
             configuration.tokenizerPath = tokenizerPath.isEmpty ? nil : tokenizerPath
             configuration.ai = ai
+            configuration.diarization = diarization
             let mailbox = SessionMailbox()
             var callbacks = mailbox.callbacks
             callbacks.analysis = { [weak self] state in await self?.receiveAnalysis(state) }
@@ -236,6 +252,7 @@ final class MeetingViewModel: ObservableObject {
     }
 
     private func apply(_ batch: SessionMailbox.Batch, audioTest: Bool) {
+        for (source, state) in batch.diarization { diarizationStates[source] = state }
         if let phase = batch.phase {
             self.phase = phase
             if case .failed = phase { } else { lastActivePhase = phase }
@@ -270,6 +287,15 @@ final class MeetingViewModel: ObservableObject {
 
     func cancelAnalysis() { session?.cancelAnalysis() }
     func retryAnalysis() { session?.retryAnalysis() }
+    func prepareDiarization() async {
+        guard !isBusy, !isPreparingDiarization else { return }
+        isPreparingDiarization = true; diarizationError = nil
+        defer { isPreparingDiarization = false }
+        do {
+            try await DiarizationModels.prepare()
+            diarizationModelReady = DiarizationModels.isReady
+        } catch { diarizationError = "Не удалось подготовить модель диаризации: \(error)" }
+    }
     var canSendContextMessage: Bool { isBusy && aiWasEnabled && canStop && !isSendingContextMessage && ![.disabled, .cancelled, .completed, .unloading].contains(aiState.phase) }
     func sendContextMessage() async {
         guard canSendContextMessage, let session else { return }
@@ -290,7 +316,7 @@ final class MeetingViewModel: ObservableObject {
     }
 
     func copyTranscript() {
-        let text = transcript.map { "[\(Self.timestamp($0.startTime))] \($0.source.rawValue): \($0.text)" }.joined(separator: "\n")
+        let text = transcript.map { "[\(Self.timestamp($0.startTime))] \($0.speakerLabel): \($0.text)" }.joined(separator: "\n")
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }

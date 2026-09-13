@@ -167,6 +167,19 @@ struct MeetingRootView: View {
                 Text("Whisper large-v3 · русский язык. Загрузка модели в память выполняется при старте встречи.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section("Разделение голосов · диаризация") {
+                Toggle("Различать собеседников в REMOTE", isOn: $model.diarizationConfiguration.remoteEnabled)
+                Toggle("Различать голоса у микрофона", isOn: $model.diarizationConfiguration.microphoneEnabled)
+                Text("Опция микрофона нужна, если рядом говорят несколько человек. При её выключении весь микрофон остаётся YOU. Источники обрабатываются раздельно; реальные имена пока не определяются.").font(.caption).foregroundStyle(.secondary)
+                LabeledContent("Модель", value: model.diarizationModelReady ? "Подготовлена · до 10 голосов в источнике" : "Требуется подготовка")
+                HStack {
+                    Button("Подготовить модель") { Task { await model.prepareDiarization() } }
+                        .disabled(model.isBusy || model.isPreparingDiarization)
+                    if model.isPreparingDiarization { ProgressView().controlSize(.small) }
+                }
+                Text("Первичная подготовка загружает модель на этот Mac. Во время встречи аудио обрабатывается локально. Изменения переключателей применяются к следующей встрече.").font(.caption).foregroundStyle(.secondary)
+                if let error = model.diarizationError { Text(error).foregroundStyle(.orange) }
+            }
         }.formStyle(.grouped)
     }
 
@@ -209,6 +222,11 @@ struct MeetingRootView: View {
             VStack(alignment: .leading, spacing: 10) {
                 meter(.you)
                 meter(.remote)
+                ForEach(AudioSource.allCases, id: \.self) { source in
+                    if let state = model.diarizationStates[source] {
+                        Text(diarizationStatus(state)).font(.caption).foregroundStyle(state.phase == .failed ? .orange : .secondary)
+                    }
+                }
                 if model.metrics.values.contains(where: { $0.backlogSeconds > 24 }) {
                     Label("Распознавание отстаёт от разговора", systemImage: "exclamationmark.triangle").foregroundStyle(.orange)
                 }
@@ -219,6 +237,16 @@ struct MeetingRootView: View {
                     }.frame(height: 120)
                 }.font(.caption).foregroundStyle(.secondary)
             }.padding(16)
+        }
+    }
+    private func diarizationStatus(_ state: DiarizationState) -> String {
+        let prefix = "Диаризация \(state.source.rawValue): "
+        switch state.phase {
+        case .loading: return prefix + "загрузка модели"
+        case .ready: return prefix + "готова"
+        case .running: return prefix + "различено голосов: \(state.detectedSpeakers)"
+        case .completed: return prefix + "завершена · голосов: \(state.detectedSpeakers)"
+        case .failed: return prefix + (state.error ?? "недоступна")
         }
     }
     @ViewBuilder
@@ -236,7 +264,7 @@ struct MeetingRootView: View {
                             ForEach(model.transcript) { event in
                                 VStack(alignment: .leading, spacing: 6) {
                                     HStack {
-                                        Text(event.source == .you ? "YOU · Вы" : "REMOTE · Собеседники")
+                                        Text(event.speakerSpans == nil ? (event.source == .you ? "YOU · Вы" : "REMOTE · Собеседники") : event.speakerLabel)
                                             .font(.caption.bold()).foregroundStyle(event.source == .you ? .blue : .teal)
                                         Text(MeetingViewModel.timestamp(event.startTime)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                                     }

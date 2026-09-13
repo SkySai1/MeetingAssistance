@@ -16,6 +16,8 @@ struct Options: Sendable {
     var ai = AIConfiguration()
     var aiEnabled = false
     var aiOutput: String?
+    var diarization = DiarizationConfiguration()
+    var prepareDiarization = false
 
     init(arguments: [String]) throws {
         var index = 0
@@ -30,6 +32,9 @@ struct Options: Sendable {
             case "--devices": devicesOnly = true
             case "--capture-only": captureOnly = true
             case "--remote-only": remoteOnly = true
+            case "--diarization": diarization.remoteEnabled = true
+            case "--microphone-diarization": diarization.microphoneEnabled = true
+            case "--prepare-diarization": prepareDiarization = true
             case "--model-path": modelPath = try value()
             case "--tokenizer-path": tokenizerPath = try value()
             case "--json": json = true
@@ -61,6 +66,9 @@ struct Options: Sendable {
       --devices                 List and resolve audio devices, then exit
       --capture-only            Show independent input levels without ASR
       --remote-only             Transcribe only REMOTE (single-stream validation)
+      --prepare-diarization     Download and check the local diarization model, then exit
+      --diarization             Separate anonymous voices in REMOTE
+      --microphone-diarization  Also separate microphone voices (default: off / YOU)
       --model-path PATH         Folder containing the local .mlmodelc models
       --tokenizer-path PATH     Folder containing local tokenizer JSON files
       --speech-threshold DB     Speech gate in dBFS (default: -42)
@@ -95,6 +103,7 @@ extension Options {
         configuration.thresholdDB = thresholdDB
         configuration.debugAudioDirectory = debugAudioDirectory
         configuration.ai = aiEnabled ? ai : nil
+        configuration.diarization = diarization
         return configuration
     }
 }
@@ -103,6 +112,6 @@ extension TranscriptEvent {
     var terminalLine: String {
         let milliseconds = Int((max(0, startTime) * 1000).rounded())
         return String(format: "[%02d:%02d.%03d] [%@] %@", milliseconds / 60000,
-                      (milliseconds / 1000) % 60, milliseconds % 1000, source.rawValue, text)
+                      (milliseconds / 1000) % 60, milliseconds % 1000, speakerLabel, text)
     }
 }

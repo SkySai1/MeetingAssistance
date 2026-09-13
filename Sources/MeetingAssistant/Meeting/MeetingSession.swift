@@ -64,6 +64,8 @@ public final class MeetingSession: Sendable {
 
     private func runSession() async throws {
         let sources = configuration.sources
+        let diarizers = Dictionary(uniqueKeysWithValues: sources.filter { !configuration.captureOnly && configuration.diarization.enabled(for: $0) }
+            .map { ($0, SourceDiarizer(source: $0, output: callbacks.diarization)) })
         let timeline = TranscriptTimeline(sources: sources) { [callbacks, analysis] event in
             try callbacks.transcript(event)
             analysis?.journal.append(event)
@@ -99,16 +101,19 @@ public final class MeetingSession: Sendable {
         callbacks.phase(.running)
         Log.info(configuration.captureOnly ? "Capturing independent PCM." : "Transcription started.")
         try await withThrowingTaskGroup(of: Void.self) { group in
+            for diarizer in diarizers.values { group.addTask { await diarizer.run() } }
             for capture in captures {
                 let pipeline = pipelines[capture.source]
-                group.addTask { try await self.captureLoop(capture, pipeline: pipeline, clock: clock) }
+                let diarizer = diarizers[capture.source]
+                group.addTask { try await self.captureLoop(capture, pipeline: pipeline, diarizer: diarizer, clock: clock) }
                 if let pipeline, let transcriber = transcribers[capture.source] {
                     group.addTask {
                         while true {
                             try Task.checkCancellation()
                             if let chunk = await pipeline.next() {
                                 let began = clock.now
-                                let events = try await transcriber.transcribe(chunk)
+                                var events = try await transcriber.transcribe(chunk)
+                                if let diarizer { events = await diarizer.annotate(events) }
                                 let elapsed = clock.now - began
                                 let lag = max(0, clock.now - chunk.end)
                                 try await pipeline.complete(events, lag: lag)
@@ -133,7 +138,8 @@ public final class MeetingSession: Sendable {
         Log.info("Meeting stopped. Finalized events: \(await timeline.emittedCount).")
     }
 
-    private func captureLoop(_ capture: AudioCapture, pipeline: StreamPipeline?, clock: MeetingClock) async throws {
+    private func captureLoop(_ capture: AudioCapture, pipeline: StreamPipeline?, diarizer: SourceDiarizer?, clock: MeetingClock) async throws {
+        defer { diarizer?.inlet.close() }
         let resampler = try pipeline.map { _ in try AudioResampler(device: capture.device) }
         var lastReport = 0.0
         var lastMeter = 0.0
@@ -163,6 +169,7 @@ public final class MeetingSession: Sendable {
             count += packet.samples.count
             if let pipeline, let resampler {
                 let converted = try resampler.convert(packet, time: time)
+                diarizer?.inlet.append(converted.samples, start: converted.start)
                 try await pipeline.ingest(converted.samples, start: converted.start)
             }
         }
