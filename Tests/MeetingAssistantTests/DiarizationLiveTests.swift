@@ -8,25 +8,31 @@ import Testing
 /// Audio and wall-clock budgets are both below one minute.
 @Test(.enabled(if: ProcessInfo.processInfo.environment["MEETING_TEST_DIARIZATION"] == "1"), .timeLimit(.minutes(1)))
 func shortFluidAudioSeparatesSourcesAndFlushesFinalTail() async throws {
+    let selection = DiarizationModel(rawValue: ProcessInfo.processInfo.environment["MEETING_TEST_DIARIZER"] ?? "ls-eend-dihard3") ?? .lsEENDDIHARD3
     let directory = URL(fileURLWithPath: ".build/validation/diarization", isDirectory: true)
     let converter = AudioConverter(sampleRate: 16000)
     let first = try converter.resampleAudioFile(directory.appendingPathComponent("first.aiff"))
     let second = try converter.resampleAudioFile(directory.appendingPathComponent("second.aiff"))
     var audio = Array<Float>(repeating: 0, count: 16000)
     var ranges: [(Double, Double)] = []
-    for clip in [first, second, first, second] {
+    for (index, clip) in [first, second, first, second].enumerated() {
         let start = Double(audio.count) / 16000
         audio += clip
         ranges.append((start, Double(audio.count) / 16000))
-        audio += Array(repeating: 0, count: 8000)
+        audio += Array(repeating: 0, count: index == 1 ? 18 * 16000 : 8000)
     }
     guard audio.count < 55 * 16000 else { throw MeetingError("Use fixtures totalling less than 55 seconds") }
     let statuses = Mutex<[AudioSource: DiarizationState]>([:])
-    let remote = SourceDiarizer(source: .remote) { state in statuses.withLock { $0[state.source] = state } }
-    let microphone = SourceDiarizer(source: .you) { state in statuses.withLock { $0[state.source] = state } }
+    let remote = SourceDiarizer(source: .remote, model: selection) { state in statuses.withLock { $0[state.source] = state } }
+    let microphone = SourceDiarizer(source: .you, model: selection) { state in statuses.withLock { $0[state.source] = state } }
     let began = ContinuousClock.now
     let remoteRun = Task { await remote.run() }, microphoneRun = Task { await microphone.run() }
     defer { remoteRun.cancel(); microphoneRun.cancel(); remote.inlet.close(); microphone.inlet.close() }
+    while statuses.withLock({ $0.count != 2 || !$0.values.allSatisfy { $0.phase == .ready } }) {
+        if statuses.withLock({ $0.values.contains { $0.phase == .failed } }) { throw MeetingError("Model load failed") }
+        guard began.duration(to: .now) < .seconds(20) else { throw MeetingError("Model load exceeded smoke budget") }
+        try await Task.sleep(for: .milliseconds(20))
+    }
     for offset in stride(from: 0, to: audio.count, by: 8000) {
         guard began.duration(to: .now) < .seconds(45) else { throw MeetingError("Diarization smoke exceeded 45-second feed budget") }
         let packet = Array(audio[offset..<min(offset + 8000, audio.count)])
@@ -47,6 +53,8 @@ func shortFluidAudioSeparatesSourcesAndFlushesFinalTail() async throws {
         #expect(last.phase == .completed, "\(last.error ?? "")")
         #expect(abs(last.processedThrough - origin - Double(audio.count) / 16000) < 0.01)
         #expect(last.detectedSpeakers >= 2)
+        #expect(last.participants.count >= 2)
+        if selection == .sortformer { #expect((last.voiceMemoryFrames ?? 0) > 0) }
         func dominant(_ event: TranscriptEvent) -> String? {
             var durations: [String: Double] = [:]
             for span in event.speakerSpans ?? [] { durations[span.speakerID, default: 0] += span.endTime - span.startTime }

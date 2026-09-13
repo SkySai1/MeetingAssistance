@@ -39,21 +39,40 @@ struct AISettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Системный промпт") {
-                TextEditor(text: $settings.configuration.systemPrompt).font(.body).frame(minHeight: 180)
+                TextEditor(text: $settings.configuration.systemPrompt).font(.body).frame(height: 180)
                 Button("Восстановить исходный промпт") { settings.configuration.systemPrompt = AIConfiguration.defaultPrompt }
                 Text("Общий промпт применяется к справке и итоговому протоколу. Формат результата задаётся приложением.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Обновление справки") {
-                Stepper("Summary: до \(settings.configuration.summaryCharacterLimit) символов", value: $settings.configuration.summaryCharacterLimit, in: 100...1500, step: 50)
-                Stepper("Фактов в справке: до \(settings.configuration.factLimit)", value: $settings.configuration.factLimit, in: 1...100)
+                integerSlider("Summary, символов", value: $settings.configuration.summaryCharacterLimit, range: 100...1500, step: 50)
+                integerSlider("Фактов в справке", value: $settings.configuration.factLimit, range: 1...100)
                 Text("Summary остаётся коротким. Остальные факты сохраняются в памяти встречи и учитываются в протоколе.").font(.caption).foregroundStyle(.secondary)
-                Stepper("Интервал: \(Int(settings.configuration.updateInterval)) с", value: $settings.configuration.updateInterval, in: 2...120, step: 2)
-                Picker("Контекст модели", selection: $settings.configuration.contextTokens) {
-                    Text("16 384 токена").tag(16384)
-                    Text("32 768 токенов").tag(32768)
-                }
+                secondsSlider("Интервал обновлений", value: $settings.configuration.updateInterval, range: 2...120, step: 2)
+                integerSlider("Контекст модели, токенов", value: $settings.configuration.contextTokens, range: 16384...65536, step: 4096)
+                integerSlider("Максимум токенов ответа", value: $settings.configuration.outputTokenLimit, range: 512...8192, step: 256)
                 Text("Больший контекст позволяет учитывать больше данных за один запрос и требует больше памяти сервера. Новые фразы объединяются; параллельные обновления одной встречи не запускаются.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Ожидание ответа") {
+                secondsSlider("Предупреждать об ожидании ответа через", value: $settings.configuration.responseWarningSeconds, range: 5...600, step: 5)
+                secondsSlider("Предупреждать об ожидании протокола через", value: $settings.configuration.protocolWarningSeconds, range: 5...1800, step: 5)
+                Text("Это мягкие лимиты: по истечении времени появится предложение дождаться ответа. Запрос продолжает выполняться, пока вы сами не отмените AI. Сетевые ошибки и недоступность сервера показываются отдельно.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("Дополнительные параметры") {
+                VStack(alignment: .leading) {
+                    Text("Вариативность ответа: \(settings.configuration.temperature, specifier: "%.2f")")
+                    Slider(value: $settings.configuration.temperature, in: 0...1, step: 0.05)
+                        .accessibilityLabel("Вариативность ответа")
+                }
+                integerSlider("Новых фраз в одном запросе", value: $settings.configuration.batchEventLimit, range: 1...24)
+                integerSlider("Допустимое отставание AI, фраз", value: $settings.configuration.pendingEventLimit, range: 64...2048, step: 64)
+                integerSlider("Пунктов в памяти справки", value: $settings.configuration.memoryEntryLimit, range: 128...2048, step: 128)
+                integerSlider("Максимальный размер ответа, КиБ", value: Binding(
+                    get: { settings.configuration.responseByteLimit / 1024 },
+                    set: { settings.configuration.responseByteLimit = $0 * 1024 }), range: 64...1024, step: 64)
+                Text("Лимиты объёма ограничивают расход памяти и размер запросов. При достижении лимита памяти полученный транскрипт и последняя справка сохраняются.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Файлы настроек") {
@@ -63,6 +82,21 @@ struct AISettingsView: View {
         }
         .formStyle(.grouped)
         .task { await settings.refresh() }
+    }
+
+    private func integerSlider(_ title: String, value: Binding<Int>, range: ClosedRange<Int>, step: Int = 1) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("\(title): \(value.wrappedValue)")
+            Slider(value: Binding(get: { Double(value.wrappedValue) }, set: { value.wrappedValue = Int($0.rounded()) }),
+                   in: Double(range.lowerBound)...Double(range.upperBound), step: Double(step)).accessibilityLabel(title)
+        }
+    }
+
+    private func secondsSlider(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("\(title): \(Int(value.wrappedValue)) с")
+            Slider(value: value, in: range, step: step).accessibilityLabel(title)
+        }
     }
 }
 

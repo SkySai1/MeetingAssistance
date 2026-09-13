@@ -18,9 +18,11 @@ struct Options: Sendable {
     var aiOutput: String?
     var diarization = DiarizationConfiguration()
     var prepareDiarization = false
+    var prepareSpeech = false
 
     init(arguments: [String]) throws {
         var index = 0
+        var customDiarizationPath: String?
         while index < arguments.count {
             let argument = arguments[index]
             func value() throws -> String {
@@ -35,6 +37,11 @@ struct Options: Sendable {
             case "--diarization": diarization.remoteEnabled = true
             case "--microphone-diarization": diarization.microphoneEnabled = true
             case "--prepare-diarization": prepareDiarization = true
+            case "--prepare-speech": prepareSpeech = true
+            case "--diarization-model":
+                guard let model = DiarizationModel(rawValue: try value()) else { throw MeetingError("Supported diarizers: ls-eend-dihard3, ls-eend-ami, sortformer-v2.1") }
+                diarization.model = model
+            case "--diarization-model-path": customDiarizationPath = try value()
             case "--model-path": modelPath = try value()
             case "--tokenizer-path": tokenizerPath = try value()
             case "--json": json = true
@@ -59,6 +66,7 @@ struct Options: Sendable {
             }
             index += 1
         }
+        if let customDiarizationPath { diarization.customModelPath = customDiarizationPath }
     }
 
     static let help = """
@@ -67,6 +75,9 @@ struct Options: Sendable {
       --capture-only            Show independent input levels without ASR
       --remote-only             Transcribe only REMOTE (single-stream validation)
       --prepare-diarization     Download and check the local diarization model, then exit
+      --prepare-speech          Download Whisper large-v3 and tokenizer into ~/.meetingassistant, then exit
+      --diarization-model NAME  ls-eend-dihard3 (default), ls-eend-ami, sortformer-v2.1
+      --diarization-model-path PATH  Custom .mlmodelc for the selected diarizer
       --diarization             Separate anonymous voices in REMOTE
       --microphone-diarization  Also separate microphone voices (default: off / YOU)
       --model-path PATH         Folder containing the local .mlmodelc models

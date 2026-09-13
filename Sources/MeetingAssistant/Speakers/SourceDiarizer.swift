@@ -37,11 +37,13 @@ final class DiarizationInlet: Sendable {
     var drained: Bool { storage.withLock { $0.closed && $0.packets.isEmpty } }
 }
 
-/// One actor and LS-EEND recurrent state per source; no cross-source matching.
+/// One actor and persistent model state per source for the whole meeting.
+/// Never reset/enroll between packets: that would erase voice memory and timestamps.
 actor SourceDiarizer {
     nonisolated let inlet = DiarizationInlet()
     private let source: AudioSource
     private let modelURL: URL
+    private let modelSelection: DiarizationModel
     private let output: @Sendable (DiarizationState) -> Void
     private var window: SpeakerActivityWindow
     private var state: DiarizationState
@@ -52,10 +54,12 @@ actor SourceDiarizer {
     }
     private nonisolated let snapshot: Mutex<Snapshot>
 
-    init(source: AudioSource, modelURL: URL = DiarizationModels.modelURL, output: @escaping @Sendable (DiarizationState) -> Void) {
-        self.source = source; self.modelURL = modelURL; self.output = output
+    init(source: AudioSource, model: DiarizationModel = .lsEENDDIHARD3, modelURL: URL? = nil, output: @escaping @Sendable (DiarizationState) -> Void) {
+        self.source = source; self.modelURL = modelURL ?? DiarizationModels.modelURL(for: model); self.output = output
+        modelSelection = model
         window = SpeakerActivityWindow(source: source)
         state = DiarizationState(source: source, phase: .loading)
+        state.model = model
         snapshot = Mutex(Snapshot(window: window, state: state))
     }
 
@@ -69,8 +73,11 @@ actor SourceDiarizer {
         defer { inlet.abandon(); publish(finished: true) }
         do {
             guard FileManager.default.fileExists(atPath: modelURL.path) else { throw MeetingError("Подготовьте модель диаризации в настройках аудио.") }
-            let model = try LSEENDModel(modelURL: modelURL, computeUnits: .cpuOnly)
-            let diarizer = try LSEENDDiarizer(model: model, timelineConfig: DiarizerTimelineConfig(maxStoredFrames: 0, storeSegments: false))
+            let diarizer = try DiarizationModels.makeDiarizer(modelSelection, at: modelURL)
+            defer { diarizer.cleanup() }
+            guard let frameHz = diarizer.modelFrameHz, frameHz > 0, let speakers = diarizer.numSpeakers else {
+                throw MeetingError("Модель не сообщила частоту кадров и число голосов.")
+            }
             state.phase = .ready; publish()
             var origin: Double?
             var end = 0.0
@@ -78,9 +85,13 @@ actor SourceDiarizer {
             func record(_ update: DiarizerTimelineUpdate?) throws {
                 guard let update, let origin else { return }
                 try window.ingest(update.chunkResult.finalizedPredictions, frameStart: update.chunkResult.startFrame,
-                    frameDuration: Double(model.metadata.frameDurationSeconds), speakers: model.metadata.maxSpeakers, origin: origin)
+                    frameDuration: 1 / frameHz, speakers: speakers, origin: origin, audioEnd: end)
                 state.processedThrough = min(end, window.processedThrough)
                 state.detectedSpeakers = window.detected.count
+                state.participants = window.ledger.participants
+                if let sortformer = diarizer as? SortformerDiarizer {
+                    state.voiceMemoryFrames = sortformer.state.spkcacheLength + sortformer.state.fifoLength
+                }
                 state.phase = .running
                 publish()
             }

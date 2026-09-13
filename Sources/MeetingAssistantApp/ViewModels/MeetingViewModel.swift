@@ -50,12 +50,17 @@ final class SessionMailbox: Sendable {
 
 @MainActor
 final class MeetingViewModel: ObservableObject {
+    @Published var selectedScreen: Screen? = .home
+    var layoutFrames: [String: CGRect] = [:]
     @Published private(set) var devices: [AudioDevice] = []
     @Published var microphoneID: UInt32? { didSet { rememberDevice(microphoneID, key: "microphoneName") } }
     @Published var remoteID: UInt32? { didSet { rememberDevice(remoteID, key: "remoteName") } }
     @Published private(set) var modelPath: String
     @Published private(set) var tokenizerPath: String
     @Published private(set) var modelReady = false
+    @Published private(set) var isDownloadingSpeechModel = false
+    @Published private(set) var speechDownloadProgress = 0.0
+    @Published private(set) var speechDownloadStatus = ""
     @Published private(set) var phase: MeetingPhase = .idle
     @Published private(set) var isBusy = false
     @Published private(set) var isAudioTest = false
@@ -73,12 +78,17 @@ final class MeetingViewModel: ObservableObject {
     @Published private(set) var contextMessageError: String?
     @Published private(set) var isSendingContextMessage = false
     @Published var diarizationConfiguration: DiarizationConfiguration {
-        didSet { do { try diarizationConfiguration.save() } catch { diarizationError = "Не удалось сохранить настройки диаризации: \(error)" } }
+        didSet {
+            diarizationModelReady = diarizationConfiguration.modelIsReady
+            do { try diarizationConfiguration.save() } catch { diarizationError = "Не удалось сохранить настройки диаризации: \(error)" }
+        }
     }
     @Published private(set) var diarizationStates: [AudioSource: DiarizationState] = [:]
     @Published private(set) var diarizationModelReady = DiarizationModels.isReady
     @Published private(set) var isPreparingDiarization = false
     @Published private(set) var diarizationError: String?
+    @Published private(set) var participants: [MeetingParticipant] = []
+    private var participantLedger = MeetingParticipantLedger()
     let aiSettings: AISettingsViewModel
 
     private let preferences: UserDefaults
@@ -95,12 +105,18 @@ final class MeetingViewModel: ObservableObject {
             diarizationConfiguration = DiarizationConfiguration()
             diarizationError = "Не удалось прочитать настройки диаризации: \(error)"
         }
-        modelPath = preferences.string(forKey: "modelPath") ?? ""
-        tokenizerPath = preferences.string(forKey: "tokenizerPath") ?? ""
+        let savedPaths: SpeechModelSettings?
+        var pathSettingsError: Error?
+        do { savedPaths = try SpeechModelSettings.load() }
+        catch { savedPaths = nil; pathSettingsError = error }
+        modelPath = savedPaths?.modelPath ?? preferences.string(forKey: "modelPath") ?? ""
+        tokenizerPath = savedPaths?.tokenizerPath ?? preferences.string(forKey: "tokenizerPath") ?? ""
+        diarizationModelReady = diarizationConfiguration.modelIsReady
         refresh()
+        if let pathSettingsError { showError("Не удалось прочитать сохранённые пути моделей. Проверьте настройки аудио.", pathSettingsError) }
     }
 
-    var canStart: Bool { !isBusy && inputsReady && modelReady }
+    var canStart: Bool { !isBusy && !isDownloadingSpeechModel && !isPreparingDiarization && inputsReady && modelReady }
     var inputsReady: Bool { microphoneID != nil && remoteID != nil && microphoneID != remoteID }
     var canStop: Bool { isBusy && !stopPending && phase != .finishingAnalysis }
 
@@ -155,7 +171,7 @@ final class MeetingViewModel: ObservableObject {
     }
 
     func chooseModelFolder(tokenizer: Bool) {
-        guard !isBusy else { return }
+        guard !isBusy, !isDownloadingSpeechModel else { return }
         let panel = NSOpenPanel()
         panel.canChooseFiles = false; panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
@@ -164,17 +180,53 @@ final class MeetingViewModel: ObservableObject {
         if tokenizer { tokenizerPath = url.path; preferences.set(url.path, forKey: "tokenizerPath") }
         else { modelPath = url.path; preferences.set(url.path, forKey: "modelPath") }
         errorMessage = nil; errorDetails = ""
+        saveSpeechPaths()
         checkModel()
     }
 
+    private func saveSpeechPaths() {
+        do { try SpeechModelSettings(modelPath: modelPath, tokenizerPath: tokenizerPath).save() }
+        catch { showError("Не удалось сохранить пути моделей.", error) }
+    }
+
+    func downloadSpeechModel() async {
+        guard !isBusy, !isDownloadingSpeechModel else { return }
+        isDownloadingSpeechModel = true; speechDownloadProgress = 0
+        defer { isDownloadingSpeechModel = false }
+        do {
+            let paths = try await SpeechModelStore.shared.prepare { [weak self] progress, status in
+                Task { @MainActor [weak self] in
+                    self?.speechDownloadProgress = progress; self?.speechDownloadStatus = status
+                }
+            }
+            modelPath = paths.model.path; tokenizerPath = paths.tokenizer.path
+            errorMessage = nil; errorDetails = ""
+            saveSpeechPaths(); checkModel()
+        } catch is CancellationError { speechDownloadStatus = "Загрузка отменена" }
+        catch { speechDownloadStatus = "Загрузка не завершена"; showError("Не удалось загрузить Whisper. Проверьте соединение или выберите готовые папки.", error) }
+    }
+
+    func cancelSpeechDownload() { Task { await SpeechModelStore.shared.cancel() } }
+
+    func chooseDiarizationFolder() {
+        guard !isBusy, !isPreparingDiarization else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
+        panel.message = "Выберите .mlmodelc для \(diarizationConfiguration.model.title)"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        diarizationConfiguration.customModelPath = url.path
+        diarizationError = diarizationModelReady ? nil : "В выбранной папке нет скомпилированной модели .mlmodelc."
+    }
+
     func start(audioTest: Bool = false) {
-        guard !isBusy, inputsReady, audioTest || modelReady else { return }
+        guard !isBusy, inputsReady, audioTest || (modelReady && !isDownloadingSpeechModel && !isPreparingDiarization) else { return }
         isBusy = true; isAudioTest = audioTest; stopPending = false
         phase = .preparing; lastActivePhase = .preparing; errorMessage = nil; errorDetails = ""
-        metrics = [:]; diagnostics = []; diarizationStates = [:]
+        metrics = [:]; diagnostics = []
         let ai = !audioTest && aiSettings.enabled ? aiSettings.configuration : nil
         let diarization = diarizationConfiguration
         if !audioTest {
+            diarizationStates = [:]; participantLedger = MeetingParticipantLedger(); participants = []
             transcript = []; elapsed = 0; hasMeeting = true
             aiWasEnabled = ai != nil; aiState = AIState(); focusedEventID = nil
             contextMessage = ""; contextMessageError = nil
@@ -252,7 +304,14 @@ final class MeetingViewModel: ObservableObject {
     }
 
     private func apply(_ batch: SessionMailbox.Batch, audioTest: Bool) {
-        for (source, state) in batch.diarization { diarizationStates[source] = state }
+        for (source, state) in batch.diarization {
+            diarizationStates[source] = state
+            participantLedger.merge(state.participants)
+        }
+        for event in batch.events where event.source == .you && event.speakerSpans == nil {
+            participantLedger.record(id: "YOU", source: .you, start: event.startTime, end: event.endTime)
+        }
+        if !batch.diarization.isEmpty || !batch.events.isEmpty { participants = participantLedger.participants }
         if let phase = batch.phase {
             self.phase = phase
             if case .failed = phase { } else { lastActivePhase = phase }
@@ -278,6 +337,8 @@ final class MeetingViewModel: ObservableObject {
         session?.requestStop()
     }
 
+    func continueWaitingForAI() { session?.continueWaitingForAnalysis() }
+
     func stopAndWait() async {
         stop()
         await runTask?.value
@@ -292,8 +353,10 @@ final class MeetingViewModel: ObservableObject {
         isPreparingDiarization = true; diarizationError = nil
         defer { isPreparingDiarization = false }
         do {
-            try await DiarizationModels.prepare()
-            diarizationModelReady = DiarizationModels.isReady
+            let selection = diarizationConfiguration.model
+            try await DiarizationModels.prepare(selection)
+            if diarizationConfiguration.model == selection { diarizationConfiguration.customModelPath = "" }
+            diarizationModelReady = diarizationConfiguration.modelIsReady
         } catch { diarizationError = "Не удалось подготовить модель диаризации: \(error)" }
     }
     var canSendContextMessage: Bool { isBusy && aiWasEnabled && canStop && !isSendingContextMessage && ![.disabled, .cancelled, .completed, .unloading].contains(aiState.phase) }
@@ -313,6 +376,29 @@ final class MeetingViewModel: ObservableObject {
         guard aiState.protocolComplete else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(aiState.protocolText, forType: .string)
+    }
+
+    /// Only the explicit, non-recording native layout diagnostic can inject fixtures.
+    func loadLayoutFixture(aiEnabled: Bool) {
+        guard ProcessInfo.processInfo.arguments.contains("--validate-layout") else { return }
+        errorMessage = nil; errorDetails = ""
+        hasMeeting = true; phase = aiEnabled ? .finishingAnalysis : .stopped
+        isBusy = aiEnabled; elapsed = 45; aiWasEnabled = aiEnabled
+        let first = TranscriptEvent(source: .remote, startTime: 1, endTime: 7, text: "Проверяем план релиза и сроки подготовки документа.",
+            speakerSpans: [SpeakerSpan(speakerID: "REMOTE_speaker_1", startTime: 1, endTime: 7)])
+        let second = TranscriptEvent(source: .you, startTime: 8, endTime: 12, text: "Подготовлю документ к следующей встрече.")
+        transcript = [first, second]
+        participantLedger = MeetingParticipantLedger()
+        participantLedger.record(id: "REMOTE_speaker_1", source: .remote, start: 1, end: 7)
+        participantLedger.record(id: "YOU", source: .you, start: 8, end: 12)
+        participants = participantLedger.participants
+        aiState = AIState(); aiState.phase = .finalizing
+        aiState.protocolText = "# Протокол встречи\n\nОбсудили релиз и подготовку документа."
+        aiState.waitWarning = "Подготовка протокола занимает больше времени. Можно продолжить ожидание."
+    }
+
+    func finishLayoutFixture() {
+        if ProcessInfo.processInfo.arguments.contains("--validate-layout") { isBusy = false }
     }
 
     func copyTranscript() {

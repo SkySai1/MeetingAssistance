@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import MeetingAssistantCore
+import SwiftUI
 
 /// Explicit development-only invocation: --validate-gui OUTPUT_DIRECTORY.
 /// Drives the same view model as the buttons, using real devices and local TTS.
@@ -11,6 +12,11 @@ enum GUIValidation {
 
     static func runIfRequested(_ model: MeetingViewModel) async {
         let arguments = ProcessInfo.processInfo.arguments
+        if let flag = arguments.firstIndex(of: "--validate-layout"), arguments.indices.contains(flag + 1), !started {
+            started = true
+            await validateLayout(model, directory: URL(fileURLWithPath: arguments[flag + 1]))
+            return
+        }
         guard !started, let flag = arguments.firstIndex(of: "--validate-gui"), arguments.indices.contains(flag + 1) else { return }
         started = true
         let directory = URL(fileURLWithPath: arguments[flag + 1], isDirectory: true)
@@ -126,6 +132,68 @@ enum GUIValidation {
         NSApp.terminate(nil)
     }
 
+    /// Native view snapshots and tab cycling only. Never captures/plays audio.
+    private static func validateLayout(_ model: MeetingViewModel, directory: URL) async {
+        var report: [String: Any] = [:]
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try await Task.sleep(for: .milliseconds(500))
+            guard let window = NSApp.windows.first(where: { $0.isVisible }), let content = window.contentView else {
+                throw MeetingError("No visible native window")
+            }
+            for ai in [false, true] {
+                model.loadLayoutFixture(aiEnabled: ai)
+                for size in [NSSize(width: 1280, height: 800), NSSize(width: 980, height: 620)] {
+                    window.setContentSize(size)
+                    for screen in [Screen.home, .audio, .meeting, .ai, .meeting] {
+                        model.selectedScreen = screen
+                        try await Task.sleep(for: .milliseconds(180))
+                        content.layoutSubtreeIfNeeded()
+                        let label = "\(Int(size.width))-\(ai ? "ai" : "no-ai")-\(screen)"
+                        let frames = model.layoutFrames
+                        if screen == .meeting, let root = frames["root"] {
+                            try require(root.minX >= -1 && root.maxX <= content.bounds.width + 1,
+                                "Root exceeds native window at \(label): \(root), window \(content.bounds)")
+                            for key in ["meeting", "transcript", "meeting-controls", "meeting-footer"] + (ai ? ["context"] : []) {
+                                guard let frame = frames[key] else { throw MeetingError("Missing layout frame: \(key)") }
+                                let visible = root.intersection(frame)
+                                try require(visible.width >= frame.width - 2 && visible.height >= frame.height - 2 && frame.height > 30,
+                                    "Clipped \(key) at \(label): \(frame), root \(root)")
+                            }
+                        }
+                        var splitFrames: [[String: Double]] = []
+                        func inspect(_ view: NSView) throws {
+                            if let split = view as? NSSplitView, !split.isHidden, split.bounds.height > 0 {
+                                for pane in split.arrangedSubviews where !pane.isHidden && !split.isSubviewCollapsed(pane) {
+                                    try require(pane.frame.width > 0 && pane.frame.height > 0, "Collapsed visible pane: \(label)")
+                                    splitFrames.append(["width": pane.frame.width, "height": pane.frame.height])
+                                }
+                            }
+                            for child in view.subviews { try inspect(child) }
+                        }
+                        try inspect(content)
+                        // SwiftUI/composited layers are absent from NSView.cacheDisplay.
+                        // Capture only our own window, never the desktop or other apps.
+                        if CGPreflightScreenCaptureAccess() {
+                            let capture = Process()
+                            capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+                            capture.arguments = ["-x", "-o", "-l", String(window.windowNumber), directory.appendingPathComponent(label + ".png").path]
+                            try capture.run()
+                            while capture.isRunning { try await Task.sleep(for: .milliseconds(20)) }
+                            if capture.terminationStatus != 0 { report["screenshots"] = "unavailable" }
+                        } else { report["screenshots"] = "unavailable: macOS screen-capture permission" }
+                        report[label] = splitFrames
+                        report[label + "-frames"] = frames.mapValues { ["x": $0.minX, "y": $0.minY, "width": $0.width, "height": $0.height] }
+                    }
+                }
+            }
+            report["result"] = "passed"
+        } catch { report["result"] = "failed"; report["error"] = String(describing: error) }
+        try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("report.json"))
+        model.finishLayoutFixture()
+        NSApp.terminate(nil)
+    }
+
     private static func require(_ condition: Bool, _ message: String) throws {
         if !condition { throw MeetingError(message) }
     }
@@ -144,5 +212,18 @@ enum GUIValidation {
         process.arguments = ["--audio-device=\(device)", "-v", "Milena", "-r", "170", text]
         try process.run()
         return process
+    }
+}
+
+struct LayoutFramesKey: PreferenceKey {
+    static let defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) { value.merge(nextValue(), uniquingKeysWith: { _, new in new }) }
+}
+
+extension View {
+    @ViewBuilder func layoutProbe(_ name: String) -> some View {
+        if ProcessInfo.processInfo.arguments.contains("--validate-layout") {
+            background(GeometryReader { geometry in Color.clear.preference(key: LayoutFramesKey.self, value: [name: geometry.frame(in: .global)]) })
+        } else { self }
     }
 }

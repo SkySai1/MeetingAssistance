@@ -76,7 +76,7 @@ struct ContextMemory: Sendable {
     private(set) var briefing = ContextBriefing()
     private var nextID = 1
 
-    mutating func apply(_ delta: ContextDelta, newEvents: [ContextInputEvent], knownIDs: Set<String>) throws {
+    mutating func apply(_ delta: ContextDelta, newEvents: [ContextInputEvent], knownIDs: Set<String>, entryLimit: Int = 512) throws {
         guard delta.topic.utf8.count <= 1000, delta.summary.utf8.count <= 6000, delta.updates.count <= 32 else {
             throw MeetingError("Справка превысила допустимый размер обновления.")
         }
@@ -125,7 +125,7 @@ struct ContextMemory: Sendable {
                 updated.entries.append(item)
             }
         }
-        guard updated.entries.count <= 512 else { throw MeetingError("Достигнут лимит 512 пунктов AI-справки. Последнее корректное состояние сохранено.") }
+        guard updated.entries.count <= entryLimit else { throw MeetingError("Достигнут лимит \(entryLimit) пунктов AI-справки. Последнее корректное состояние сохранено.") }
         updated.topic = delta.topic
         updated.summary = delta.summary
         briefing = updated

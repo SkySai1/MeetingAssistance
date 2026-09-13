@@ -10,10 +10,12 @@ public struct ModelPaths: Sendable {
     public init(model: String? = nil, tokenizer: String? = nil) throws {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let base = documents.appendingPathComponent("huggingface/models")
+        let managed = SpeechModelStore.directory
+        let hasManaged = FileManager.default.fileExists(atPath: managed.appendingPathComponent("model/AudioEncoder.mlmodelc").path)
         self.model = model.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
-            ?? base.appendingPathComponent("argmaxinc/whisperkit-coreml/openai_whisper-large-v3-v20240930_626MB")
+            ?? (hasManaged ? managed.appendingPathComponent("model") : base.appendingPathComponent("argmaxinc/whisperkit-coreml/openai_whisper-large-v3-v20240930_626MB"))
         self.tokenizer = tokenizer.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
-            ?? base.appendingPathComponent("openai/whisper-large-v3")
+            ?? (hasManaged ? managed.appendingPathComponent("tokenizer") : base.appendingPathComponent("openai/whisper-large-v3"))
         for file in ["AudioEncoder.mlmodelc", "MelSpectrogram.mlmodelc", "TextDecoder.mlmodelc"] {
             guard FileManager.default.fileExists(atPath: self.model.appendingPathComponent(file).path) else {
                 throw MeetingError("Local model component missing: \(self.model.appendingPathComponent(file).path)")

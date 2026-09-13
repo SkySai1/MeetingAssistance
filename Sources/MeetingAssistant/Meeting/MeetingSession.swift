@@ -20,6 +20,7 @@ public final class MeetingSession: Sendable {
     public func requestStop() { stopRequested.store(true, ordering: .releasing) }
     public func cancelAnalysis() { if let analysis { Task { await analysis.cancel() } } }
     public func retryAnalysis() { if let analysis { Task { await analysis.retry() } } }
+    public func continueWaitingForAnalysis() { if let analysis { Task { await analysis.continueWaiting() } } }
     public func addContextMessage(_ text: String, time: Double) async throws {
         guard let analysis, !stopRequested.load(ordering: .acquiring) else { throw MeetingError("AI не включён или встреча уже завершается.") }
         try await analysis.addMessage(text, time: time)
@@ -65,7 +66,8 @@ public final class MeetingSession: Sendable {
     private func runSession() async throws {
         let sources = configuration.sources
         let diarizers = Dictionary(uniqueKeysWithValues: sources.filter { !configuration.captureOnly && configuration.diarization.enabled(for: $0) }
-            .map { ($0, SourceDiarizer(source: $0, output: callbacks.diarization)) })
+            .map { ($0, SourceDiarizer(source: $0, model: configuration.diarization.model,
+                modelURL: configuration.diarization.resolvedModelURL, output: callbacks.diarization)) })
         let timeline = TranscriptTimeline(sources: sources) { [callbacks, analysis] event in
             try callbacks.transcript(event)
             analysis?.journal.append(event)

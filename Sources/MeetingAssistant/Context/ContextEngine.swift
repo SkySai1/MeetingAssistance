@@ -18,7 +18,8 @@ actor ContextEngine {
     private var didRequest = false
     private var leaseKey: String?
     private let owner = UUID()
-    private var finalizationDeadline: ContinuousClock.Instant?
+    private var protocolWarningAt: ContinuousClock.Instant?
+    private var responseWarningAt: ContinuousClock.Instant?
     private var forceUpdate = false
 
     init(configuration: AIConfiguration, client: (any OllamaServing)? = nil,
@@ -42,6 +43,28 @@ actor ContextEngine {
         if !finished && !cancelled { suspended = false; backlogAcknowledged = true }
     }
 
+    func continueWaiting() async {
+        guard !finished, !cancelled else { return }
+        if activeRequest != nil { responseWarningAt = .now.advanced(by: .seconds(configuration.responseWarningSeconds)) }
+        if journal.snapshot().closed { protocolWarningAt = .now.advanced(by: .seconds(configuration.protocolWarningSeconds)) }
+        state.waitWarning = nil
+        await publish()
+    }
+
+    private func checkWaitWarning() async {
+        guard !finished, !cancelled, !state.protocolComplete, state.phase != .unloading else { return }
+        if journal.snapshot().closed && protocolWarningAt == nil {
+            protocolWarningAt = .now.advanced(by: .seconds(configuration.protocolWarningSeconds))
+        }
+        guard state.waitWarning == nil else { return }
+        if let protocolWarningAt, .now >= protocolWarningAt {
+            state.waitWarning = "Подготовка протокола длится дольше \(Int(configuration.protocolWarningSeconds)) секунд. Можно дождаться ответа — обработка продолжается."
+        } else if let responseWarningAt, .now >= responseWarningAt {
+            state.waitWarning = "Ответ Ollama занимает больше \(Int(configuration.responseWarningSeconds)) секунд. Можно дождаться ответа — запрос остаётся активным."
+        } else { return }
+        await publish()
+    }
+
     func addMessage(_ text: String, time: Double) async throws {
         guard !finished, !cancelled, !journal.snapshot().closed else { throw MeetingError("Контекст этой встречи уже закрыт.") }
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -56,9 +79,17 @@ actor ContextEngine {
 
     func run() async {
         var terminal = AIPhase.completed
+        var waitMonitor: Task<Void, Never>?
+        defer { waitMonitor?.cancel() }
         do {
             try configuration.validate()
-            client = try suppliedClient ?? OllamaClient(server: configuration.server)
+            client = try suppliedClient ?? OllamaClient(server: configuration.server, responseByteLimit: configuration.responseByteLimit)
+            waitMonitor = Task {
+                while !Task.isCancelled {
+                    await self.checkWaitWarning()
+                    do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+                }
+            }
             await publish()
             var failures = 0
             var nextAttempt = ContinuousClock.now
@@ -66,14 +97,12 @@ actor ContextEngine {
                 try checkCancelled()
                 let snapshot = journal.snapshot()
                 state.totalEvents = snapshot.events.count
-                if snapshot.closed && finalizationDeadline == nil { finalizationDeadline = .now.advanced(by: .seconds(180)) }
-                if let finalizationDeadline, .now >= finalizationDeadline { throw MeetingError("Не удалось завершить AI за отведённое время. Справка и транскрипт сохранены.") }
                 if let failure = snapshot.failure { throw MeetingError(failure) }
                 if state.processedEvents == snapshot.events.count && snapshot.closed { break }
-                if snapshot.events.count - state.processedEvents <= 256 { backlogAcknowledged = false }
-                if snapshot.events.count - state.processedEvents > 512 && !snapshot.closed && !suspended && !backlogAcknowledged {
+                if snapshot.events.count - state.processedEvents <= configuration.pendingEventLimit / 2 { backlogAcknowledged = false }
+                if snapshot.events.count - state.processedEvents > configuration.pendingEventLimit && !snapshot.closed && !suspended && !backlogAcknowledged {
                     suspended = true
-                    state.error = "AI отстал более чем на 512 фраз. Анализ приостановлен; транскрипция продолжается."
+                    state.error = "AI отстал более чем на \(configuration.pendingEventLimit) фраз. Анализ приостановлен; транскрипция продолжается."
                     state.phase = .failed
                     await publish()
                 }
@@ -117,6 +146,7 @@ actor ContextEngine {
         }
         // Cleanup uses the original configuration. It is not cancelled with a
         // generation task, and the lease remains held until it has completed.
+        state.waitWarning = nil
         if didRequest, let client {
             state.phase = .unloading
             state.releaseStatus = .unloading
@@ -150,14 +180,14 @@ actor ContextEngine {
 
     // UTF-8 bytes form a conservative token upper bound for textual input. Leave
     // room for the system prompt, template, generation, and model special tokens.
-    private var promptBudget: Int { configuration.contextTokens - 4096 }
+    private var promptBudget: Int { configuration.contextTokens - configuration.outputTokenLimit - 1096 }
 
     private func batch(from events: [ContextInputEvent], starting index: Int) throws -> [ContextInputEvent] {
         var result: [ContextInputEvent] = []
         let budget = min(5000, max(1000, promptBudget / 3))
         var size = 0
         let encoder = JSONEncoder()
-        for event in events.dropFirst(index).prefix(12) {
+        for event in events.dropFirst(index).prefix(configuration.batchEventLimit) {
             let count = try encoder.encode(event).count
             if size + count > budget { break }
             result.append(event)
@@ -200,7 +230,7 @@ actor ContextEngine {
               delta.updates.filter({ $0.kind == .fact }).count <= configuration.factLimit else {
             throw MeetingError("Модель превысила заданный лимит summary или фактов. Предыдущая справка сохранена.")
         }
-        try memory.apply(delta, newEvents: events, knownIDs: knownIDs)
+        try memory.apply(delta, newEvents: events, knownIDs: knownIDs, entryLimit: configuration.memoryEntryLimit)
         state.briefing = memory.briefing
         let facts = state.briefing.entries.filter { $0.kind == .fact }
         let visible = Set(facts.suffix(configuration.factLimit).map(\.id))
@@ -272,25 +302,15 @@ actor ContextEngine {
         let request = OllamaChatRequest(model: configuration.model,
             messages: [OllamaMessage(role: "system", content: configuration.systemPrompt), OllamaMessage(role: "user", content: prompt)],
             format: schema,
-            options: .init(num_ctx: configuration.contextTokens, num_predict: 3000))
-        let timeout = min(Duration.seconds(120), finalizationDeadline.map { ContinuousClock.now.duration(to: $0) } ?? .seconds(120))
+            options: .init(num_ctx: configuration.contextTokens, num_predict: configuration.outputTokenLimit, temperature: configuration.temperature))
+        responseWarningAt = .now.advanced(by: .seconds(configuration.responseWarningSeconds))
         let task = Task {
-            try await withThrowingTaskGroup(of: String.self) { group in
-                group.addTask {
-                    try await client.chat(request) { [weak self] text in
-                        await self?.receive(text, json: json, prefix: prefix)
-                    }
-                }
-                group.addTask {
-                    try await Task.sleep(for: timeout)
-                    throw MeetingError("Истекло время ожидания ответа Ollama.")
-                }
-                defer { group.cancelAll() }
-                return try await group.next()!
+            try await client.chat(request) { [weak self] text in
+                await self?.receive(text, json: json, prefix: prefix)
             }
         }
         activeRequest = task
-        defer { activeRequest = nil }
+        defer { activeRequest = nil; responseWarningAt = nil; state.waitWarning = nil }
         let result = try await task.value
         try checkCancelled()
         return result

@@ -1,7 +1,7 @@
 import MeetingAssistantCore
 import SwiftUI
 
-private enum Screen: String, CaseIterable, Identifiable {
+enum Screen: String, CaseIterable, Identifiable {
     case home = "Подготовка", audio = "Настройки аудио", ai = "Настройки AI", meeting = "Встреча"
     var id: Self { self }
     var icon: String {
@@ -16,12 +16,12 @@ private enum Screen: String, CaseIterable, Identifiable {
 
 struct MeetingRootView: View {
     @ObservedObject var model: MeetingViewModel
-    @State private var screen: Screen? = .home
     @State private var confirmNewMeeting = false
+    @State private var participantsExpanded = true
 
     var body: some View {
         NavigationSplitView {
-            List(Screen.allCases, selection: $screen) { screen in
+            List(Screen.allCases, selection: $model.selectedScreen) { screen in
                 Label(screen.rawValue, systemImage: screen.icon).tag(screen)
             }
             .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 240)
@@ -47,14 +47,15 @@ struct MeetingRootView: View {
                     .padding().frame(maxWidth: .infinity, alignment: .leading)
                     .background(.orange.opacity(0.07))
                 }
-                switch screen ?? .home {
+                switch model.selectedScreen ?? .home {
                 case .home: home
                 case .audio: audioSettings
                 case .ai: AISettingsView(settings: model.aiSettings, meetingActive: model.isBusy)
                 case .meeting: liveMeeting
                 }
             }
-            .navigationTitle((screen ?? .home).rawValue)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .navigationTitle((model.selectedScreen ?? .home).rawValue)
             .toolbar {
                 ToolbarItem(placement: .primaryAction) {
                     if model.isBusy {
@@ -67,18 +68,23 @@ struct MeetingRootView: View {
                 }
             }
         }
+        .navigationSplitViewStyle(.balanced)
+        .layoutProbe("root")
+        .onPreferenceChange(LayoutFramesKey.self) { model.layoutFrames = $0 }
         .confirmationDialog("Начать новую встречу?", isPresented: $confirmNewMeeting, titleVisibility: .visible) {
-            Button("Начать новую встречу", role: .destructive) { model.start(); screen = .meeting }
+            Button("Начать новую встречу", role: .destructive) { model.start(); model.selectedScreen = .meeting }
         } message: {
             Text("Текст текущей встречи хранится только в этом окне и будет очищен. При необходимости сначала скопируйте его.")
         }
-        .task { await model.aiSettings.refresh() }
-        .onChange(of: model.hasMeeting) { _, hasMeeting in if hasMeeting { screen = .meeting } }
+        .task {
+            if !ProcessInfo.processInfo.arguments.contains("--validate-layout") { await model.aiSettings.refresh() }
+        }
+        .onChange(of: model.hasMeeting) { _, hasMeeting in if hasMeeting { model.selectedScreen = .meeting } }
     }
 
     private func startMeeting() {
         if model.hasMeeting { confirmNewMeeting = true }
-        else { model.start(); screen = .meeting }
+        else { model.start(); model.selectedScreen = .meeting }
     }
 
     private var home: some View {
@@ -105,8 +111,8 @@ struct MeetingRootView: View {
                         .foregroundStyle(.orange)
                 }
                 HStack {
-                    Button("Настроить звук") { screen = .audio }
-                    Button("Настроить AI") { screen = .ai }
+                    Button("Настроить звук") { model.selectedScreen = .audio }
+                    Button("Настроить AI") { model.selectedScreen = .ai }
                     Spacer()
                     Button(model.hasMeeting ? "Новая встреча" : "Начать встречу", systemImage: "record.circle") { startMeeting() }
                         .buttonStyle(.borderedProminent).controlSize(.large).disabled(!model.canStart)
@@ -160,10 +166,21 @@ struct MeetingRootView: View {
                 Text("Во время проверки микрофон и звук собеседников захватываются только для уровней: текст и аудиофайлы не сохраняются.")
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Section("Локальная модель") {
+            Section("Распознавание речи · Whisper") {
                 LabeledContent("Статус", value: model.modelReady ? "Файлы найдены" : "Файлы не найдены")
                 folderRow("Модель", path: model.modelPath, tokenizer: false)
                 folderRow("Словарь", path: model.tokenizerPath, tokenizer: true)
+                HStack {
+                    Button("Загрузить Whisper large-v3 · 626 MB") { Task { await model.downloadSpeechModel() } }
+                        .disabled(model.isBusy || model.isDownloadingSpeechModel)
+                    if model.isDownloadingSpeechModel {
+                        Button("Отменить") { model.cancelSpeechDownload() }
+                    }
+                }
+                if model.isDownloadingSpeechModel { ProgressView(value: model.speechDownloadProgress) }
+                if !model.speechDownloadStatus.isEmpty { Text(model.speechDownloadStatus).font(.caption) }
+                Text("Приложение загружает модель и словарь в ~/.meetingassistant/models/whisper. Готовые файлы можно выбрать выше; поддерживается Whisper large-v3 для WhisperKit.")
+                    .font(.caption).foregroundStyle(.secondary)
                 Text("Whisper large-v3 · русский язык. Загрузка модели в память выполняется при старте встречи.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -171,10 +188,23 @@ struct MeetingRootView: View {
                 Toggle("Различать собеседников в REMOTE", isOn: $model.diarizationConfiguration.remoteEnabled)
                 Toggle("Различать голоса у микрофона", isOn: $model.diarizationConfiguration.microphoneEnabled)
                 Text("Опция микрофона нужна, если рядом говорят несколько человек. При её выключении весь микрофон остаётся YOU. Источники обрабатываются раздельно; реальные имена пока не определяются.").font(.caption).foregroundStyle(.secondary)
-                LabeledContent("Модель", value: model.diarizationModelReady ? "Подготовлена · до 10 голосов в источнике" : "Требуется подготовка")
+                Picker("Модель разделения голосов", selection: $model.diarizationConfiguration.model) {
+                    ForEach(DiarizationModel.allCases) { Text($0.title).tag($0) }
+                }.disabled(model.isBusy || model.isPreparingDiarization)
+                Text(model.diarizationConfiguration.model.details).font(.caption).foregroundStyle(.secondary)
+                LabeledContent("Статус", value: model.diarizationModelReady ? "Файлы найдены" : "Требуется загрузка или выбор папки")
+                LabeledContent("Папка модели") {
+                    Text(model.diarizationConfiguration.resolvedModelURL.path).lineLimit(1).truncationMode(.middle)
+                        .help(model.diarizationConfiguration.resolvedModelURL.path)
+                    Button("Выбрать…") { model.chooseDiarizationFolder() }.disabled(model.isBusy || model.isPreparingDiarization)
+                }
                 HStack {
-                    Button("Подготовить модель") { Task { await model.prepareDiarization() } }
+                    Button("Загрузить выбранную модель") { Task { await model.prepareDiarization() } }
                         .disabled(model.isBusy || model.isPreparingDiarization)
+                    if !model.diarizationConfiguration.customModelPath.isEmpty {
+                        Button("Использовать папку приложения") { model.diarizationConfiguration.customModelPath = "" }
+                            .disabled(model.isBusy || model.isPreparingDiarization)
+                    }
                     if model.isPreparingDiarization { ProgressView().controlSize(.small) }
                 }
                 Text("Первичная подготовка загружает модель на этот Mac. Во время встречи аудио обрабатывается локально. Изменения переключателей применяются к следующей встрече.").font(.caption).foregroundStyle(.secondary)
@@ -186,7 +216,7 @@ struct MeetingRootView: View {
     private func folderRow(_ title: String, path: String, tokenizer: Bool) -> some View {
         LabeledContent(title) {
             Text(path.isEmpty ? "Стандартная папка" : path).lineLimit(1).truncationMode(.middle).help(path)
-            Button("Выбрать…") { model.chooseModelFolder(tokenizer: tokenizer) }.disabled(model.isBusy)
+            Button("Выбрать…") { model.chooseModelFolder(tokenizer: tokenizer) }.disabled(model.isBusy || model.isDownloadingSpeechModel)
         }
     }
 
@@ -203,6 +233,7 @@ struct MeetingRootView: View {
     }
 
     private var liveMeeting: some View {
+        GeometryReader { available in
         VStack(spacing: 0) {
             HStack {
                 Circle().fill(model.phase == .running && !model.isAudioTest ? .red : .secondary).frame(width: 9, height: 9)
@@ -210,16 +241,42 @@ struct MeetingRootView: View {
                 Spacer()
                 Text(MeetingViewModel.timestamp(model.elapsed)).font(.title2.monospacedDigit())
                 Button("Скопировать", systemImage: "doc.on.doc") { model.copyTranscript() }.disabled(model.transcript.isEmpty)
-            }.padding(20)
+            }.padding(20).layoutProbe("meeting-controls")
             Divider()
-            HSplitView {
-                transcriptPane.frame(minWidth: 320)
-                if model.aiWasEnabled {
-                    AIContextView(model: model).frame(minWidth: 300, idealWidth: 400, maxWidth: 520)
-                }
+            if model.aiWasEnabled {
+                // A nested AppKit split view retains an oversized intrinsic width
+                // across NavigationSplitView tab changes. Size both panes from the
+                // actual available detail area so neither can push content offscreen.
+                GeometryReader { geometry in
+                    let contextWidth = min(520, geometry.size.width * 0.46)
+                    HStack(spacing: 0) {
+                        transcriptPane.frame(width: max(0, geometry.size.width - contextWidth - 1), height: geometry.size.height)
+                            .layoutProbe("transcript")
+                        Divider().frame(width: 1)
+                        AIContextView(model: model).frame(width: contextWidth, height: geometry.size.height)
+                            .layoutProbe("context")
+                    }.frame(width: geometry.size.width, height: geometry.size.height, alignment: .topLeading)
+                }.frame(minHeight: 160, maxHeight: .infinity).layoutPriority(1)
+            } else {
+                transcriptPane.frame(maxWidth: .infinity, minHeight: 160, maxHeight: .infinity).layoutPriority(1).layoutProbe("transcript")
             }
             Divider()
+            ScrollView {
             VStack(alignment: .leading, spacing: 10) {
+                DisclosureGroup("Участники встречи · \(model.participants.count)", isExpanded: $participantsExpanded) {
+                    if model.participants.isEmpty {
+                        Text("Обнаруженные голоса появятся здесь. Включите разделение голосов в настройках аудио.")
+                            .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        Table(model.participants) {
+                            TableColumn("Участник", value: \.id)
+                            TableColumn("Источник") { Text($0.source.rawValue) }.width(80)
+                            TableColumn("Впервые") { Text(MeetingViewModel.timestamp($0.firstHeard)) }.width(80)
+                            TableColumn("Последняя речь") { Text(MeetingViewModel.timestamp($0.lastHeard)) }.width(110)
+                            TableColumn("Время речи") { Text(MeetingViewModel.timestamp($0.speechDuration)) }.width(85)
+                        }.frame(height: min(130, 30 + Double(model.participants.count) * 24))
+                    }
+                }
                 meter(.you)
                 meter(.remote)
                 ForEach(AudioSource.allCases, id: \.self) { source in
@@ -237,6 +294,8 @@ struct MeetingRootView: View {
                     }.frame(height: 120)
                 }.font(.caption).foregroundStyle(.secondary)
             }.padding(16)
+            }.frame(height: min(260, available.size.height * 0.38)).layoutProbe("meeting-footer")
+        }.frame(maxWidth: .infinity, maxHeight: .infinity).layoutProbe("meeting")
         }
     }
     private func diarizationStatus(_ state: DiarizationState) -> String {

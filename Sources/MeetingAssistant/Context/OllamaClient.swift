@@ -25,7 +25,7 @@ struct OllamaChatRequest: Encodable, Sendable {
     struct Options: Encodable, Sendable {
         let num_ctx: Int
         let num_predict: Int
-        let temperature = 0.0
+        var temperature = 0.0
     }
 }
 
@@ -80,6 +80,8 @@ protocol OllamaServing: Sendable {
 
 // Stateful framing survives arbitrary HTTP chunks, including a split UTF-8 scalar.
 struct OllamaStreamDecoder {
+    var byteLimit = 262_144
+    init(byteLimit: Int = 262_144) { self.byteLimit = byteLimit }
     private var line = Data()
     private(set) var text = ""
     private(set) var done = false
@@ -108,7 +110,7 @@ struct OllamaStreamDecoder {
         if let error = frame.error { throw MeetingError("Ollama: \(error)") }
         if frame.done_reason == "length" { throw MeetingError("Ответ модели достиг ограничения длины. Обновление не применено.") }
         let content = frame.message?.content ?? ""
-        guard text.utf8.count + content.utf8.count <= 262_144 else { throw MeetingError("Ответ модели превысил ограничение размера.") }
+        guard text.utf8.count + content.utf8.count <= byteLimit else { throw MeetingError("Ответ модели превысил ограничение размера.") }
         text += content
         done = frame.done == true
         return !content.isEmpty || done
@@ -127,12 +129,17 @@ struct OllamaStreamDecoder {
 public final class OllamaClient: Sendable, OllamaServing {
     private let base: URL
     private let session: URLSession
+    private let responseByteLimit: Int
+    // The user-facing timers only warn. A finite Foundation transport ceiling
+    // avoids resetting a live HTTP stream at the former 45/120-second deadlines.
+    private static let streamingTransportTimeout = TimeInterval(Int32.max)
 
-    public init(server: String) throws {
+    public init(server: String, responseByteLimit: Int = 262_144) throws {
         base = try Self.baseURL(server)
+        self.responseByteLimit = responseByteLimit
         let configuration = URLSessionConfiguration.ephemeral
-        configuration.timeoutIntervalForRequest = 45
-        configuration.timeoutIntervalForResource = 120
+        configuration.timeoutIntervalForRequest = Self.streamingTransportTimeout
+        configuration.timeoutIntervalForResource = Self.streamingTransportTimeout
         configuration.urlCache = nil
         configuration.httpShouldSetCookies = false
         session = URLSession(configuration: configuration)
@@ -141,6 +148,7 @@ public final class OllamaClient: Sendable, OllamaServing {
     init(server: String, session: URLSession) throws {
         base = try Self.baseURL(server)
         self.session = session
+        responseByteLimit = 262_144
     }
 
     deinit { session.invalidateAndCancel() }
@@ -162,7 +170,7 @@ public final class OllamaClient: Sendable, OllamaServing {
     }
 
     func chat(_ request: OllamaChatRequest, onText: @escaping @Sendable (String) async -> Void) async throws -> String {
-        var http = URLRequest(url: base.appendingPathComponent("api/chat"))
+        var http = URLRequest(url: base.appendingPathComponent("api/chat"), timeoutInterval: Self.streamingTransportTimeout)
         http.httpMethod = "POST"
         http.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let encoder = JSONEncoder()
@@ -172,7 +180,7 @@ public final class OllamaClient: Sendable, OllamaServing {
         return try await withTaskCancellationHandler {
             defer { bytes.task.cancel() }
             try Self.check(response)
-            var decoder = OllamaStreamDecoder()
+            var decoder = OllamaStreamDecoder(byteLimit: responseByteLimit)
             var lastPublished = ContinuousClock.now
             for try await byte in bytes {
                 try Task.checkCancellation()

@@ -36,7 +36,59 @@ import Testing
     let expired = window.annotate(TranscriptEvent(source: .remote, startTime: 0, endTime: 1, text: "Старая фраза"))
     #expect(expired.speakerIDs == [])
     #expect(window.detected.count == 2)
+    #expect(window.ledger.participants.count == 2)
+    #expect(window.ledger.participants.first?.speechDuration == 2)
     #expect(throws: MeetingError.self) { try window.ingest([0.5], frameStart: 125, frameDuration: 1, speakers: 2, origin: 0) }
+}
+
+@Test func diarizationModelSettingsMigrateAndKeepIndependentCustomFolders() throws {
+    var legacy = try JSONDecoder().decode(DiarizationConfiguration.self, from: Data(#"{"remoteEnabled":true,"microphoneEnabled":false}"#.utf8))
+    #expect(legacy.model == .lsEENDDIHARD3 && legacy.customModelPath.isEmpty)
+    legacy.customModelPath = "/one/model.mlmodelc"
+    legacy.model = .sortformer
+    #expect(legacy.customModelPath.isEmpty)
+    legacy.customModelPath = "/two/model.mlmodelc"
+    #expect(legacy.resolvedModelURL.path == "/two/model.mlmodelc")
+    legacy.model = .lsEENDDIHARD3
+    #expect(legacy.customModelPath == "/one/model.mlmodelc")
+    #expect(try JSONDecoder().decode(DiarizationConfiguration.self, from: JSONEncoder().encode(legacy)) == legacy)
+    let cli = try Options(arguments: ["--diarization-model-path", "/custom.mlmodelc", "--diarization-model", "sortformer-v2.1"])
+    #expect(cli.diarization.resolvedModelURL.path == "/custom.mlmodelc" && cli.diarization.model == .sortformer)
+}
+
+@Test func participantSnapshotsRetainQuietSpeakersWithoutDoubleCounting() throws {
+    var voice = SpeakerActivityWindow(source: .remote)
+    try voice.ingest([1, 0, 0, 1], frameStart: 0, frameDuration: 1, speakers: 2, origin: 0)
+    let early = voice.ledger.participants
+    try voice.ingest(Array(repeating: 0, count: 600), frameStart: 2, frameDuration: 1, speakers: 2, origin: 0)
+    try voice.ingest([1, 0], frameStart: 302, frameDuration: 1, speakers: 2, origin: 0, audioEnd: 302.5)
+    var ledger = MeetingParticipantLedger()
+    ledger.merge(early); ledger.merge(voice.ledger.participants); ledger.merge(early)
+    #expect(ledger.participants.count == 2)
+    #expect(ledger.participants.first?.speechDuration == 1.5)
+    #expect(ledger.participants.first?.lastHeard == 302.5)
+    #expect(ledger.participants.last?.lastHeard == 2)
+}
+
+@Test func shortActivitySpikesDoNotCreateParticipantsAndConfirmedOnsetSurvivesPacketBoundary() throws {
+    var window = SpeakerActivityWindow(source: .remote)
+    try window.ingest([1, 1, 1, 1], frameStart: 0, frameDuration: 0.1, speakers: 2, origin: 0)
+    #expect(window.ledger.participants.isEmpty)
+    try window.ingest([1, 0, 1, 0], frameStart: 2, frameDuration: 0.1, speakers: 2, origin: 0)
+    #expect(window.ledger.participants.count == 1)
+    #expect(window.ledger.participants.first?.firstHeard == 0)
+    #expect(window.ledger.participants.first?.speechDuration == 0.4)
+}
+
+@Test func customSpeechPathsRoundTripWithoutTouchingModelFiles() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let url = directory.appendingPathComponent("speech-models.json")
+    let settings = SpeechModelSettings(modelPath: "/my model", tokenizerPath: "/my tokenizer")
+    try settings.save(to: url)
+    #expect(try SpeechModelSettings.load(from: url)?.modelPath == "/my model")
+    #expect(try SpeechModelSettings.load(from: url)?.tokenizerPath == "/my tokenizer")
+    #expect(throws: MeetingError.self) { try ModelPaths(model: settings.modelPath, tokenizer: settings.tokenizerPath) }
 }
 
 @Test func diarizationInletsFailIndependentlyAndDrainOnClose() throws {

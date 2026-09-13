@@ -10,6 +10,8 @@ struct AIContextView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
             HStack {
                 Text("Контекст встречи").font(.headline)
                 Spacer()
@@ -17,6 +19,14 @@ struct AIContextView: View {
             }
             Text(status).font(.caption).foregroundStyle(.secondary)
             Text("AI: \(state.model) · \(state.server)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            if let warning = state.waitWarning {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(warning).font(.callout).foregroundStyle(.orange)
+                    Button("Продолжить ждать") { model.continueWaitingForAI() }
+                    Text("Ожидание не прерывает транскрипцию. Остановить запрос можно кнопкой отмены AI.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
             if let error = state.error {
                 Text(error).font(.callout).foregroundStyle(.orange).textSelection(.enabled)
                 if model.isBusy && model.phase != .finishingAnalysis && state.phase == .failed {
@@ -29,7 +39,6 @@ struct AIContextView: View {
                     Text("Протокол").tag(true)
                 }.pickerStyle(.segmented)
             }
-            ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     if showProtocol && !state.protocolText.isEmpty {
                         if !state.protocolComplete { Text("Протокол формируется · черновик").font(.caption).foregroundStyle(.secondary) }
@@ -74,6 +83,7 @@ struct AIContextView: View {
                         }
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(maxWidth: .infinity, alignment: .leading)
             }
             if model.isBusy && model.aiWasEnabled {
                 VStack(alignment: .leading, spacing: 6) {
