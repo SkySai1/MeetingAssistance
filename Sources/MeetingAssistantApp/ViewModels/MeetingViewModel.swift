@@ -393,7 +393,8 @@ final class MeetingViewModel: ObservableObject {
         participantLedger.record(id: "YOU", source: .you, start: 8, end: 12)
         participants = participantLedger.participants
         aiState = AIState(); aiState.phase = .finalizing
-        aiState.protocolText = "# Протокол встречи\n\nОбсудили релиз и подготовку документа."
+        aiState.protocolText = "# Протокол встречи\n\n" + String(repeating: "Обсудили релиз и подготовку документа. ", count: 100)
+        aiState.briefing.summary = String(repeating: "Обсуждаем сроки релиза и подготовку документа. ", count: 100)
         aiState.waitWarning = "Подготовка протокола занимает больше времени. Можно продолжить ожидание."
     }
 

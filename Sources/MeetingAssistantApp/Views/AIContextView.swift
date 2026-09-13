@@ -19,6 +19,9 @@ struct AIContextView: View {
             }
             Text(status).font(.caption).foregroundStyle(.secondary)
             Text("AI: \(state.model) · \(state.server)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+            if let notice = state.generationNotice {
+                Text(notice).font(.callout).foregroundStyle(.orange)
+            }
             if let warning = state.waitWarning {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(warning).font(.callout).foregroundStyle(.orange)
@@ -42,16 +45,16 @@ struct AIContextView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     if showProtocol && !state.protocolText.isEmpty {
                         if !state.protocolComplete { Text("Протокол формируется · черновик").font(.caption).foregroundStyle(.secondary) }
-                        Text(state.protocolText).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                        ExpandableAIText(text: state.protocolText, settings: model.aiSettings)
                     } else {
-                        if !state.briefing.topic.isEmpty { Text(state.briefing.topic).font(.title3.bold()) }
+                        if !state.briefing.topic.isEmpty { ExpandableAIText(text: state.briefing.topic, settings: model.aiSettings).font(.title3.bold()) }
                         if !state.draftSummary.isEmpty {
                             VStack(alignment: .leading, spacing: 6) {
                                 Text("Обновляется · черновик").font(.caption).foregroundStyle(.secondary)
-                                Text(state.draftSummary)
+                                ExpandableAIText(text: state.draftSummary, settings: model.aiSettings)
                             }.padding(10).background(.blue.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
                         }
-                        if !state.briefing.summary.isEmpty { Text(state.briefing.summary).textSelection(.enabled) }
+                        if !state.briefing.summary.isEmpty { ExpandableAIText(text: state.briefing.summary, settings: model.aiSettings) }
                         ForEach(ContextKind.allCases, id: \.self) { kind in
                             let entries = state.briefing.entries.filter { $0.kind == kind }
                             if !entries.isEmpty {
@@ -115,13 +118,13 @@ struct AIContextView: View {
 
     private func entryRow(_ entry: ContextEntry) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(entry.text).textSelection(.enabled)
+            ExpandableAIText(text: entry.text, settings: model.aiSettings)
                 .foregroundStyle(entry.status == "active" ? .primary : .secondary)
             if entry.status != "active" {
                 Text(entry.status == "superseded" ? "Изменено позднее" : "Закрыто").font(.caption).foregroundStyle(.secondary)
             }
-            if !entry.owner.isEmpty { Text("Ответственный: \(entry.owner)").font(.caption) }
-            if !entry.deadline.isEmpty { Text("Срок: \(entry.deadline)").font(.caption) }
+            if !entry.owner.isEmpty { ExpandableAIText(text: "Ответственный: \(entry.owner)", settings: model.aiSettings).font(.caption) }
+            if !entry.deadline.isEmpty { ExpandableAIText(text: "Срок: \(entry.deadline)", settings: model.aiSettings).font(.caption) }
             HStack {
                 ForEach(Array(entry.sourceIDs.prefix(3)), id: \.self) { id in
                     if let event = model.transcript.first(where: { $0.id == id }) {
@@ -143,9 +146,37 @@ struct AIContextView: View {
         case .ready: "Справка обновлена · \(state.processedEvents) событий"
         case .finalizing: "Готовим итоговый протокол"
         case .unloading: state.protocolComplete ? "Протокол получен · освобождаем модель" : "Освобождаем модель"
-        case .completed: state.releaseStatus == .unloaded ? "Готово · модель выгружена" : "Обработка завершена"
+        case .completed: state.protocolTruncated == true ? "Ответ получен · достигнут лимит токенов" : (state.releaseStatus == .unloaded ? "Готово · модель выгружена" : "Обработка завершена")
         case .cancelled: state.releaseStatus == .unloaded ? "AI отменён · модель выгружена" : "AI отменён"
         case .failed: "Анализ недоступен · транскрипт сохранён"
+        }
+    }
+}
+
+/// Presentation only: neither expansion nor the character threshold mutates AI state.
+struct AITextPreview: Equatable {
+    let text: String
+    let isTruncated: Bool
+    init(_ fullText: String, limit: Int, expanded: Bool) {
+        let end = fullText.index(fullText.startIndex, offsetBy: max(0, limit), limitedBy: fullText.endIndex) ?? fullText.endIndex
+        isTruncated = end != fullText.endIndex
+        text = isTruncated && !expanded ? String(fullText[..<end]) + "…" : fullText
+    }
+}
+
+struct ExpandableAIText: View {
+    let text: String
+    @ObservedObject var settings: AISettingsViewModel
+    @State private var expanded = false
+
+    var body: some View {
+        let preview = AITextPreview(text, limit: settings.configuration.responsePreviewCharacters, expanded: expanded)
+        VStack(alignment: .leading, spacing: 6) {
+            Text(preview.text).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            if preview.isTruncated {
+                Button(expanded ? "Свернуть" : "Показать полностью (\(text.count) символов)") { expanded.toggle() }
+                    .buttonStyle(.link).font(.caption)
+            }
         }
     }
 }

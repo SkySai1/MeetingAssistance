@@ -45,12 +45,13 @@ struct AISettingsView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Обновление справки") {
-                integerSlider("Summary, символов", value: $settings.configuration.summaryCharacterLimit, range: 100...1500, step: 50)
+                integerSlider("Символов до сворачивания текста", value: $settings.configuration.responsePreviewCharacters, range: 100...10_000, step: 100)
                 integerSlider("Фактов в справке", value: $settings.configuration.factLimit, range: 1...100)
-                Text("Summary остаётся коротким. Остальные факты сохраняются в памяти встречи и учитываются в протоколе.").font(.caption).foregroundStyle(.secondary)
+                Text("Длинные блоки показываются сокращённо с кнопкой раскрытия. Полный текст сохраняется и копируется целиком. Порог отображения не ограничивает ответ модели; промпт по-прежнему просит краткую справку.").font(.caption).foregroundStyle(.secondary)
                 secondsSlider("Интервал обновлений", value: $settings.configuration.updateInterval, range: 2...120, step: 2)
                 integerSlider("Контекст модели, токенов", value: $settings.configuration.contextTokens, range: 16384...65536, step: 4096)
                 integerSlider("Максимум токенов ответа", value: $settings.configuration.outputTokenLimit, range: 512...8192, step: 256)
+                Text("Ограничение передаётся Ollama для каждого запроса справки и протокола. При его достижении генерация останавливается; ответ может закончиться посреди предложения.").font(.caption).foregroundStyle(.secondary)
                 Text("Больший контекст позволяет учитывать больше данных за один запрос и требует больше памяти сервера. Новые фразы объединяются; параллельные обновления одной встречи не запускаются.")
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -69,10 +70,7 @@ struct AISettingsView: View {
                 integerSlider("Новых фраз в одном запросе", value: $settings.configuration.batchEventLimit, range: 1...24)
                 integerSlider("Допустимое отставание AI, фраз", value: $settings.configuration.pendingEventLimit, range: 64...2048, step: 64)
                 integerSlider("Пунктов в памяти справки", value: $settings.configuration.memoryEntryLimit, range: 128...2048, step: 128)
-                integerSlider("Максимальный размер ответа, КиБ", value: Binding(
-                    get: { settings.configuration.responseByteLimit / 1024 },
-                    set: { settings.configuration.responseByteLimit = $0 * 1024 }), range: 64...1024, step: 64)
-                Text("Лимиты объёма ограничивают расход памяти и размер запросов. При достижении лимита памяти полученный транскрипт и последняя справка сохраняются.")
+                Text("Лимиты количества пунктов ограничивают память справки и очередь запросов. При достижении лимита памяти полученный транскрипт и последняя справка сохраняются.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Файлы настроек") {

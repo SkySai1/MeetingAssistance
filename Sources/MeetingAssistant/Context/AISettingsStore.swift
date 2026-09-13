@@ -27,6 +27,11 @@ public struct AISettingsStore: Sendable {
             guard data.count <= 4000, let text = String(data: data, encoding: .utf8) else { throw MeetingError("Системный промпт должен быть UTF-8, не более 4000 байт.") }
             result.configuration.systemPrompt = text
         }
+        // Migrate only the exact previous default. Custom prompts remain verbatim.
+        if result.configuration.systemPrompt == AIConfiguration.previousDefaultPrompt {
+            result.configuration.systemPrompt = AIConfiguration.defaultPrompt
+            try save(result)
+        }
         return result
     }
     public func save(_ document: AISettingsDocument) throws {

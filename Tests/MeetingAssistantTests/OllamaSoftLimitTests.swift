@@ -12,14 +12,14 @@ private actor WaitingOllama: OllamaServing {
     init(holdProtocol: Bool) { self.holdProtocol = holdProtocol }
     func allowResponse() { released = true }
     func models() -> [OllamaModel] { [OllamaModel(name: name, size: nil, digest: nil, capabilities: ["completion"])] }
-    func chat(_ request: OllamaChatRequest, onText: @escaping @Sendable (String) async -> Void) async throws -> String {
+    func chat(_ request: OllamaChatRequest, onText: @escaping @Sendable (String) async -> Void) async throws -> OllamaChatResponse {
         requestCount += 1
         if (request.format == nil) == holdProtocol {
             while !released { try await Task.sleep(for: .milliseconds(10)) }
         }
         let result = request.format == nil ? "# Протокол\nГотово после ожидания" : #"{"topic":"Тест","summary":"Краткая справка","updates":[]}"#
         await onText(result)
-        return result
+        return OllamaChatResponse(text: result)
     }
     func unload(model: String) { didUnload = true }
 }
@@ -85,7 +85,7 @@ private func waitForWarning(_ states: borrowing Mutex<[AIState]>) async throws {
     #expect(old.responseWarningSeconds == 120 && old.protocolWarningSeconds == 180 && old.outputTokenLimit == 3000)
     var updated = old
     updated.outputTokenLimit = 8192; updated.contextTokens = 65536; updated.protocolWarningSeconds = 1800
-    updated.responseByteLimit = 1_048_576; updated.temperature = 0.4
+    updated.responsePreviewCharacters = 10_000; updated.temperature = 0.4
     try updated.validate()
     #expect(try JSONDecoder().decode(AIConfiguration.self, from: JSONEncoder().encode(updated)) == updated)
     updated.protocolWarningSeconds = .nan
