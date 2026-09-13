@@ -8,6 +8,17 @@ struct MeetingAssistant {
     static func main() async {
         do {
             let options = try Options(arguments: Array(CommandLine.arguments.dropFirst()))
+            if options.prepareSpeech {
+                let paths = try await SpeechModelStore.shared.prepare()
+                Log.info("Whisper ready: \(paths.model.path)\nTokenizer: \(paths.tokenizer.path)")
+                return
+            }
+            if options.prepareDiarization {
+                Log.info("Preparing local diarization model...")
+                try await DiarizationModels.prepare(options.diarization.model)
+                Log.info("Diarization model ready: \(DiarizationModels.modelURL(for: options.diarization.model).path)")
+                return
+            }
             Log.info("MeetingAssistant starting...\n\nAudio devices:")
             let devices = try AudioDeviceManager.devices()
             for device in devices {
@@ -48,6 +59,11 @@ struct MeetingAssistant {
                     }
                     if [.completed, .cancelled].contains(state.phase) {
                         Log.info("AI \(state.phase.rawValue): \(state.processedEvents)/\(state.totalEvents) events; model \(state.releaseStatus.rawValue)")
+                    }
+                },
+                diarization: { state in
+                    if state.phase != .running {
+                        Log.info("Diarization \(state.source.rawValue): \(state.phase.rawValue) — \(state.detectedSpeakers) voices\(state.error.map { ": " + $0 } ?? "")")
                     }
                 }
             ))

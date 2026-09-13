@@ -20,17 +20,20 @@ public struct MeetingCallbacks: Sendable {
     public var diagnostic: @Sendable (String) -> Void
     public var transcript: @Sendable (TranscriptEvent) throws -> Void
     public var analysis: @Sendable (AIState) async -> Void
+    public var diarization: @Sendable (DiarizationState) -> Void
 
     public init(
         phase: @escaping @Sendable (MeetingPhase) -> Void = { _ in },
         metrics: @escaping @Sendable (AudioMetrics) -> Void = { _ in },
         diagnostic: @escaping @Sendable (String) -> Void = { _ in },
         transcript: @escaping @Sendable (TranscriptEvent) throws -> Void = { _ in },
-        analysis: @escaping @Sendable (AIState) async -> Void = { _ in }
+        analysis: @escaping @Sendable (AIState) async -> Void = { _ in },
+        diarization: @escaping @Sendable (DiarizationState) -> Void = { _ in }
     ) {
         self.phase = phase; self.metrics = metrics
         self.diagnostic = diagnostic; self.transcript = transcript
         self.analysis = analysis
+        self.diarization = diarization
     }
 }
 
@@ -44,6 +47,7 @@ public struct MeetingConfiguration: Sendable {
     public var thresholdDB = -42.0
     public var debugAudioDirectory: String?
     public var ai: AIConfiguration?
+    public var diarization = DiarizationConfiguration()
 
     public init(selected: [AudioSource: AudioDevice]) { self.selected = selected }
 

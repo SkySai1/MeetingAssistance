@@ -6,13 +6,20 @@ public struct TranscriptEvent: Codable, Sendable, Equatable, Identifiable {
     public let startTime: Double
     public let endTime: Double
     public let text: String
-
-    public init(id: String = UUID().uuidString, source: AudioSource, startTime: Double, endTime: Double, text: String) {
-        self.id = id; self.source = source
-        self.startTime = startTime; self.endTime = endTime; self.text = text
+    public let speakerSpans: [SpeakerSpan]?
+    public var speakerIDs: [String]? { speakerSpans.map { Array(Set($0.map(\.speakerID))).sorted() } }
+    public var speakerLabel: String {
+        guard let speakerIDs else { return source.rawValue }
+        return speakerIDs.isEmpty ? "\(source.rawValue) · Unknown" : speakerIDs.joined(separator: ", ")
     }
 
-    private enum CodingKeys: String, CodingKey { case id, source, startTime, endTime, text }
+    public init(id: String = UUID().uuidString, source: AudioSource, startTime: Double, endTime: Double, text: String, speakerSpans: [SpeakerSpan]? = nil) {
+        self.id = id; self.source = source
+        self.startTime = startTime; self.endTime = endTime; self.text = text
+        self.speakerSpans = speakerSpans
+    }
+
+    private enum CodingKeys: String, CodingKey { case id, source, startTime, endTime, text, speakerSpans }
 
     public init(from decoder: any Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
@@ -21,6 +28,7 @@ public struct TranscriptEvent: Codable, Sendable, Equatable, Identifiable {
         startTime = try values.decode(Double.self, forKey: .startTime)
         endTime = try values.decode(Double.self, forKey: .endTime)
         text = try values.decode(String.self, forKey: .text)
+        speakerSpans = try values.decodeIfPresent([SpeakerSpan].self, forKey: .speakerSpans)
     }
 }
 

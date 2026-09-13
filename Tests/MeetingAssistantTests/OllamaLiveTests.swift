@@ -29,6 +29,7 @@ func liveOllamaRetainsEarlyDecisionAndFinalTail() async throws {
             }
             engine.journal.append(next)
         }
+        try await engine.addMessage("Контекст: это встреча команды разработки по планированию релиза. Справка нужна для технического руководителя.", time: 2)
         engine.journal.close()
         await run.value
     } catch {
@@ -41,9 +42,11 @@ func liveOllamaRetainsEarlyDecisionAndFinalTail() async throws {
     let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
     try encoder.encode(states.withLock { $0 }).write(to: directory.appendingPathComponent("states.json"))
     try result.protocolText.write(to: directory.appendingPathComponent("protocol.md"), atomically: true, encoding: .utf8)
-    #expect(result.protocolComplete && result.processedEvents == 3 && result.updates == 3)
+    #expect(result.protocolComplete && result.processedEvents == 4 && result.updates >= 3)
     #expect(result.releaseStatus == .unloaded)
     #expect(result.error == nil)
+    #expect(result.messages.count == 1)
+    #expect(states.withLock { $0.allSatisfy { $0.briefing.summary.count <= config.summaryCharacterLimit && $0.briefing.entries.filter { $0.kind == .fact }.count <= config.factLimit } })
     #expect(result.briefing.entries.contains { $0.sourceIDs.contains("early") && $0.text.contains("47") })
     #expect(result.briefing.entries.contains { $0.sourceIDs.contains("late") && $0.text.lowercased().contains("резервн") })
     #expect(result.briefing.entries.contains { $0.status == "superseded" && $0.sourceIDs.contains("early") && $0.sourceIDs.contains("late") })

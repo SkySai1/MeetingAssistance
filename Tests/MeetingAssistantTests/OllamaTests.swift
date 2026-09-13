@@ -3,8 +3,8 @@ import Synchronization
 import Testing
 @testable import MeetingAssistantCore
 
-private func event(_ id: String, _ text: String = "Релиз в пятницу") -> TranscriptEvent {
-    TranscriptEvent(id: id, source: .remote, startTime: 0, endTime: 1, text: text)
+private func event(_ id: String, _ text: String = "Релиз в пятницу") -> ContextInputEvent {
+    ContextInputEvent(TranscriptEvent(id: id, source: .remote, startTime: 0, endTime: 1, text: text))
 }
 
 private func item(_ source: String, id: String = "", text: String = "Релиз в пятницу", status: String = "active") -> ContextEntry {
@@ -103,7 +103,7 @@ private actor FakeOllama: OllamaServing {
         let prompt = request.messages.last!.content
         let marker = "НОВЫЕ СОБЫТИЯ:\n"
         let data = Data(prompt.components(separatedBy: marker).last!.utf8)
-        let events = try JSONDecoder().decode([TranscriptEvent].self, from: data)
+        let events = try JSONDecoder().decode([ContextInputEvent].self, from: data)
         let result = ContextDelta(topic: "Релиз", summary: "План встречи", updates: events.map { item($0.id, text: $0.text) })
         let text = String(decoding: try JSONEncoder().encode(result), as: UTF8.self)
         await onText(text)
@@ -163,4 +163,21 @@ private actor FakeOllama: OllamaServing {
     try await lease.acquire("server/model", owner: b)
     await lease.release("server/model", owner: a)
     await #expect(throws: MeetingError.self) { try await lease.acquire("server/model", owner: a) }
+}
+
+@Test func userContextMessageIsLabelledAndIncludedWithoutCreatingTranscriptSpeech() async throws {
+    var config = AIConfiguration(); config.model = UUID().uuidString
+    let client = FakeOllama(name: config.model, delivered: DeliveryFlag())
+    let states = Mutex<[AIState]>([])
+    let engine = ContextEngine(configuration: config, client: client) { state in states.withLock { $0.append(state) } }
+    engine.journal.append(event("speech"))
+    try await engine.addMessage("Мы обсуждаем учебный проект, выделяй технические ограничения.", time: 2)
+    let input = engine.journal.snapshot().events
+    #expect(input.count == 2 && input[1].source == "USER_NOTE" && input[1].kind == "userNote")
+    engine.journal.close()
+    await #expect(throws: MeetingError.self) { try await engine.addMessage("Позднее сообщение", time: 3) }
+    await engine.run()
+    #expect(states.withLock { $0.last?.processedEvents } == 2)
+    #expect(states.withLock { $0.last?.messages.count } == 1)
+    #expect(await client.requests.last?.messages.last?.content.contains("USER_NOTE") == true)
 }

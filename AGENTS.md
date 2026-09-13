@@ -195,9 +195,7 @@ Because the local microphone is isolated, anything captured from that source can
 speaker = YOU
 ```
 
-No speaker recognition is needed for the local microphone.
-
-Speaker diarization and identification will later be applied ONLY to the `REMOTE` stream.
+By default, microphone speech remains YOU without diarization. The user explicitly requested optional microphone diarization on 2026-09-12: enable it only with a separate setting, default off. Keep microphone and REMOTE diarizers independent; anonymous IDs must include their source. Voice identification remains a later phase.
 
 ---
 
@@ -430,7 +428,7 @@ Logging infrastructure should later also feed user-friendly SwiftUI status indic
 
 # Speaker diarization — later phase
 
-After dual-stream ASR is stable, process only the REMOTE stream with FluidAudio.
+Process REMOTE with FluidAudio. Also provide optional microphone diarization, off by default, as explicitly requested by the user. Never mix the sources.
 
 Desired conceptual result:
 
@@ -636,7 +634,7 @@ Support the user's HTTP(S) Ollama server, including a server on another machine.
 
 Fetch the available model list from the configured server automatically and let the user choose. Provide refresh and connection status. Do not silently substitute a missing model or download models automatically.
 
-Provide an editable, persisted system prompt with a default and reset action. Use it for both live context and the final protocol. Freeze server, model, and prompt for each meeting; changes apply to the next meeting.
+Provide an editable system prompt with a default and reset action. Store AI settings in `~/.meetingassistant/settings.json` and the prompt in `~/.meetingassistant/system-prompt.txt`; reload them on app startup. Keep summary short without appending meeting history. Let the user configure summary character and fact-count limits, collapse fact/question lists, and submit labelled USER_NOTE messages to guide context during a meeting. Notes are not ASR utterances. Use it for both live context and the final protocol. Freeze server, model, and prompt for each meeting; changes apply to the next meeting.
 
 Use verified public APIs: `GET /api/tags`, streaming `POST /api/chat`, `POST /api/generate` with `keep_alive: 0` to unload, and `GET /api/ps` to verify. API references and edge cases are documented in [OLLAMA_PLAN.md](OLLAMA_PLAN.md).
 
@@ -951,7 +949,7 @@ When the user clicks Start Meeting:
 4. Start the meeting monotonic clock.
 5. Start both capture pipelines.
 6. Start live transcription.
-7. If diarization is enabled, start it for REMOTE.
+7. If diarization is enabled, start it for REMOTE and, only when separately enabled, for the microphone.
 8. If AI is enabled and Ollama is available, start context updates using the meeting's settings snapshot.
 9. Transition UI to Live Meeting.
 
@@ -1304,7 +1302,7 @@ Diarization and SQLite are not prerequisites. At this phase speakers remain YOU/
 
 ## Phase 9 — FluidAudio diarization
 
-Add diarization ONLY to REMOTE.
+Add diarization to REMOTE and provide a separate opt-in toggle for microphone diarization. With microphone diarization off, its transcript stays YOU; with it on, show source-local anonymous speaker IDs. Do not infer real identities.
 
 Acceptance criteria:
 
@@ -1316,7 +1314,7 @@ REMOTE -> speaker_2
 
 with usable timestamps.
 
-Expose diarization state in GUI.
+Expose independent diarization state in GUI. Keep source-specific speaker IDs stable within a meeting and flush pending segments on Stop.
 
 ---
 
