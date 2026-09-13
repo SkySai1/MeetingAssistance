@@ -77,7 +77,7 @@ struct ContextMemory: Sendable {
     private var nextID = 1
 
     mutating func apply(_ delta: ContextDelta, newEvents: [ContextInputEvent], knownIDs: Set<String>, entryLimit: Int = 512) throws {
-        guard delta.topic.utf8.count <= 1000, delta.summary.utf8.count <= 6000, delta.updates.count <= 32 else {
+        guard delta.updates.count <= 32 else {
             throw MeetingError("Справка превысила допустимый размер обновления.")
         }
         var updated = briefing
@@ -85,7 +85,6 @@ struct ContextMemory: Sendable {
         let newIDs = Set(newEvents.map(\.id))
         for change in delta.updates {
             guard !change.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  change.text.utf8.count <= 2400, change.owner.utf8.count <= 300, change.deadline.utf8.count <= 300,
                   ["active", "resolved", "superseded"].contains(change.status),
                   !change.sourceIDs.isEmpty, change.sourceIDs.count <= 32,
                   Set(change.sourceIDs).isSubset(of: knownIDs) else {

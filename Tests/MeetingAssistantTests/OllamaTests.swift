@@ -92,13 +92,13 @@ private actor FakeOllama: OllamaServing {
         self.name = name; self.delivered = delivered; self.failFirst = failFirst; self.slow = slow
     }
     func models() -> [OllamaModel] { [OllamaModel(name: name, size: nil, digest: nil, capabilities: ["completion"])] }
-    func chat(_ request: OllamaChatRequest, onText: @escaping @Sendable (String) async -> Void) async throws -> String {
+    func chat(_ request: OllamaChatRequest, onText: @escaping @Sendable (String) async -> Void) async throws -> OllamaChatResponse {
         requests.append(request)
         if slow { try await Task.sleep(for: .seconds(60)) }
         if failFirst { failFirst = false; await onText(#"{"summary":"черновик","updates":["#); throw MeetingError("stream interrupted") }
         if request.format == nil {
             await onText("# Протокол\nПятница")
-            return "# Протокол\nПятница и финальная фраза"
+            return OllamaChatResponse(text: "# Протокол\nПятница и финальная фраза")
         }
         let prompt = request.messages.last!.content
         let marker = "НОВЫЕ СОБЫТИЯ:\n"
@@ -107,7 +107,7 @@ private actor FakeOllama: OllamaServing {
         let result = ContextDelta(topic: "Релиз", summary: "План встречи", updates: events.map { item($0.id, text: $0.text) })
         let text = String(decoding: try JSONEncoder().encode(result), as: UTF8.self)
         await onText(text)
-        return text
+        return OllamaChatResponse(text: text)
     }
     func unload(model: String) {
         deliveryBeforeUnload = delivered.value.withLock { $0 }

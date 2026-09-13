@@ -60,8 +60,8 @@ indirect enum OllamaSchema: Encodable, Sendable {
         }
     }
 
-    static func context(entries: [ContextEntry], eventIDs: [String], summaryLimit: Int = 500) -> Self {
-        .object(["topic": .string(), "summary": .string(maximum: summaryLimit), "updates": .array(.alternatives(ContextKind.allCases.map { kind in
+    static func context(entries: [ContextEntry], eventIDs: [String]) -> Self {
+        .object(["topic": .string(), "summary": .string(), "updates": .array(.alternatives(ContextKind.allCases.map { kind in
             .object([
                 "id": .string([""] + entries.filter { $0.kind == kind }.map(\.id)), "kind": .string([kind.rawValue]),
                 "text": .string(), "sourceIDs": .array(.string(eventIDs), 32, minimum: 1),
@@ -72,31 +72,38 @@ indirect enum OllamaSchema: Encodable, Sendable {
     }
 }
 
+struct OllamaChatResponse: Sendable {
+    let text: String
+    var doneReason: String?
+    var evaluationCount: Int?
+    var tokenLimitReached: Bool { doneReason == "length" }
+}
+
 protocol OllamaServing: Sendable {
     func models() async throws -> [OllamaModel]
-    func chat(_ request: OllamaChatRequest, onText: @escaping @Sendable (String) async -> Void) async throws -> String
+    func chat(_ request: OllamaChatRequest, onText: @escaping @Sendable (String) async -> Void) async throws -> OllamaChatResponse
     func unload(model: String) async throws
 }
 
 // Stateful framing survives arbitrary HTTP chunks, including a split UTF-8 scalar.
 struct OllamaStreamDecoder {
-    var byteLimit = 262_144
-    init(byteLimit: Int = 262_144) { self.byteLimit = byteLimit }
     private var line = Data()
     private(set) var text = ""
     private(set) var done = false
+    private(set) var doneReason: String?
+    private(set) var evaluationCount: Int?
     private struct Frame: Decodable {
         struct Message: Decodable { let content: String? }
         let message: Message?
         let done: Bool?
         let done_reason: String?
+        let eval_count: Int?
         let error: String?
     }
 
     mutating func append(_ byte: UInt8) throws -> Bool {
         guard !done else { return false }
         if byte != 10 {
-            guard line.count < 1_048_576 else { throw MeetingError("Слишком большой фрагмент ответа Ollama.") }
             line.append(byte)
             return false
         }
@@ -108,11 +115,10 @@ struct OllamaStreamDecoder {
         guard !line.isEmpty else { return false }
         let frame = try JSONDecoder().decode(Frame.self, from: line)
         if let error = frame.error { throw MeetingError("Ollama: \(error)") }
-        if frame.done_reason == "length" { throw MeetingError("Ответ модели достиг ограничения длины. Обновление не применено.") }
         let content = frame.message?.content ?? ""
-        guard text.utf8.count + content.utf8.count <= byteLimit else { throw MeetingError("Ответ модели превысил ограничение размера.") }
         text += content
         done = frame.done == true
+        if done { doneReason = frame.done_reason; evaluationCount = frame.eval_count }
         return !content.isEmpty || done
     }
 
@@ -129,14 +135,12 @@ struct OllamaStreamDecoder {
 public final class OllamaClient: Sendable, OllamaServing {
     private let base: URL
     private let session: URLSession
-    private let responseByteLimit: Int
     // The user-facing timers only warn. A finite Foundation transport ceiling
     // avoids resetting a live HTTP stream at the former 45/120-second deadlines.
     private static let streamingTransportTimeout = TimeInterval(Int32.max)
 
-    public init(server: String, responseByteLimit: Int = 262_144) throws {
+    public init(server: String) throws {
         base = try Self.baseURL(server)
-        self.responseByteLimit = responseByteLimit
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = Self.streamingTransportTimeout
         configuration.timeoutIntervalForResource = Self.streamingTransportTimeout
@@ -148,7 +152,6 @@ public final class OllamaClient: Sendable, OllamaServing {
     init(server: String, session: URLSession) throws {
         base = try Self.baseURL(server)
         self.session = session
-        responseByteLimit = 262_144
     }
 
     deinit { session.invalidateAndCancel() }
@@ -169,7 +172,7 @@ public final class OllamaClient: Sendable, OllamaServing {
         return try JSONDecoder().decode(Response.self, from: data).models.sorted { $0.name < $1.name }
     }
 
-    func chat(_ request: OllamaChatRequest, onText: @escaping @Sendable (String) async -> Void) async throws -> String {
+    func chat(_ request: OllamaChatRequest, onText: @escaping @Sendable (String) async -> Void) async throws -> OllamaChatResponse {
         var http = URLRequest(url: base.appendingPathComponent("api/chat"), timeoutInterval: Self.streamingTransportTimeout)
         http.httpMethod = "POST"
         http.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -180,7 +183,7 @@ public final class OllamaClient: Sendable, OllamaServing {
         return try await withTaskCancellationHandler {
             defer { bytes.task.cancel() }
             try Self.check(response)
-            var decoder = OllamaStreamDecoder(byteLimit: responseByteLimit)
+            var decoder = OllamaStreamDecoder()
             var lastPublished = ContinuousClock.now
             for try await byte in bytes {
                 try Task.checkCancellation()
@@ -195,7 +198,7 @@ public final class OllamaClient: Sendable, OllamaServing {
             }
             let result = try decoder.finish()
             await onText(result)
-            return result
+            return OllamaChatResponse(text: result, doneReason: decoder.doneReason, evaluationCount: decoder.evaluationCount)
         } onCancel: { bytes.task.cancel() }
     }
 

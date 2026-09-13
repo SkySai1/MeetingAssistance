@@ -10,7 +10,7 @@ actor ContextEngine {
     private var client: (any OllamaServing)?
     private var state = AIState()
     private var memory = ContextMemory()
-    private var activeRequest: Task<String, any Error>?
+    private var activeRequest: Task<OllamaChatResponse, any Error>?
     private var cancelled = false
     private var suspended = false
     private var backlogAcknowledged = false
@@ -83,7 +83,7 @@ actor ContextEngine {
         defer { waitMonitor?.cancel() }
         do {
             try configuration.validate()
-            client = try suppliedClient ?? OllamaClient(server: configuration.server, responseByteLimit: configuration.responseByteLimit)
+            client = try suppliedClient ?? OllamaClient(server: configuration.server)
             waitMonitor = Task {
                 while !Task.isCancelled {
                     await self.checkWaitWarning()
@@ -214,7 +214,7 @@ actor ContextEngine {
             recent.insert(event, at: 0)
         }
         let recentJSON = String(decoding: try encoder.encode(recent), as: UTF8.self)
-        let prefix = instruction + "\nSummary: максимум \(configuration.summaryCharacterLimit) символов, 2–3 коротких предложения. Переписывай его, не дополняй историю. Не более \(configuration.factLimit) новых фактов; выделяй главное. USER_NOTE — контекстное сообщение пользователя, а не произнесённая реплика. Используй его для уточнения темы и акцентов.\nВ updates sourceIDs указывай только из НОВЫХ событий. Прежние ссылки приложение сохраняет само. Не возвращай старые пункты без изменения.\nСОХРАНЁННОЕ СОСТОЯНИЕ (выборка полного журнала):\n"
+        let prefix = instruction + "\nSummary: 2–3 коротких предложения. Переписывай его, не дополняй историю. Не более \(configuration.factLimit) новых фактов; выделяй главное. USER_NOTE — контекстное сообщение пользователя, а не произнесённая реплика. Используй его для уточнения темы и акцентов.\nВ updates sourceIDs указывай только из НОВЫХ событий. Прежние ссылки приложение сохраняет само. Не возвращай старые пункты без изменения.\nСОХРАНЁННОЕ СОСТОЯНИЕ (выборка полного журнала):\n"
         let suffix = "\nПРЕДЫДУЩИЕ ФРАЗЫ (уже обработаны, для связности):\n" + recentJSON + "\nНОВЫЕ СОБЫТИЯ:\n" + eventJSON
         let remaining = promptBudget - configuration.systemPrompt.utf8.count - prefix.utf8.count - suffix.utf8.count
         guard remaining >= 500 else { throw MeetingError("Для системного промпта и фраз недостаточно контекста. Увеличьте контекст или сократите промпт.") }
@@ -224,11 +224,10 @@ actor ContextEngine {
         state.error = nil
         state.draftSummary = ""
         await publish()
-        let text = try await generate(prompt, json: true, schema: .context(entries: memory.briefing.entries, eventIDs: events.map(\.id), summaryLimit: configuration.summaryCharacterLimit))
+        let text = try await generate(prompt, json: true, schema: .context(entries: memory.briefing.entries, eventIDs: events.map(\.id)))
         let delta = try JSONDecoder().decode(ContextDelta.self, from: Data(text.utf8))
-        guard delta.summary.count <= configuration.summaryCharacterLimit,
-              delta.updates.filter({ $0.kind == .fact }).count <= configuration.factLimit else {
-            throw MeetingError("Модель превысила заданный лимит summary или фактов. Предыдущая справка сохранена.")
+        guard delta.updates.filter({ $0.kind == .fact }).count <= configuration.factLimit else {
+            throw MeetingError("Модель превысила заданное число фактов. Предыдущая справка сохранена.")
         }
         try memory.apply(delta, newEvents: events, knownIDs: knownIDs, entryLimit: configuration.memoryEntryLimit)
         state.briefing = memory.briefing
@@ -277,7 +276,20 @@ actor ContextEngine {
                         if try encoder.encode(next).count > budget { break }
                         portion = next
                     }
-                    guard !portion.isEmpty else { throw MeetingError("Пункт протокола превышает бюджет контекста.") }
+                    if portion.isEmpty {
+                        // An accepted long model answer may exceed the next input
+                        // budget. Retain that already grounded entry verbatim rather
+                        // than rejecting or silently cutting it to fit another call.
+                        let entry = entries[offset]
+                        state.protocolText += "- \(entry.text)\n"
+                        if !entry.owner.isEmpty { state.protocolText += "  Ответственный: \(entry.owner)\n" }
+                        if !entry.deadline.isEmpty { state.protocolText += "  Срок: \(entry.deadline)\n" }
+                        if entry.status != "active" { state.protocolText += "  Статус: \(entry.status == "superseded" ? "изменено позднее" : "закрыто")\n" }
+                        state.protocolText += "  " + entry.sourceIDs.map { "[\($0)]" }.joined(separator: " ") + "\n\n"
+                        offset += 1
+                        await publish()
+                        continue
+                    }
                     let prefix = state.protocolText
                     let prompt = instruction + "\nСейчас напиши только список для раздела «\(kind.title)», без заголовка и общего вступления. Отрази каждый из следующих пунктов, включая его статус и ссылки:\n"
                         + String(decoding: try encoder.encode(portion), as: UTF8.self)
@@ -304,6 +316,7 @@ actor ContextEngine {
             format: schema,
             options: .init(num_ctx: configuration.contextTokens, num_predict: configuration.outputTokenLimit, temperature: configuration.temperature))
         responseWarningAt = .now.advanced(by: .seconds(configuration.responseWarningSeconds))
+        if json || state.protocolTruncated != true { state.generationNotice = nil }
         let task = Task {
             try await client.chat(request) { [weak self] text in
                 await self?.receive(text, json: json, prefix: prefix)
@@ -313,12 +326,19 @@ actor ContextEngine {
         defer { activeRequest = nil; responseWarningAt = nil; state.waitWarning = nil }
         let result = try await task.value
         try checkCancelled()
-        return result
+        if result.tokenLimitReached {
+            state.generationNotice = "Ollama остановила ответ по лимиту \(configuration.outputTokenLimit) токенов. Полученный текст сохранён; он может быть незавершённым."
+            if !json { state.protocolTruncated = true }
+            if json && (try? JSONDecoder().decode(ContextDelta.self, from: Data(result.text.utf8))) == nil {
+                throw MeetingError("Лимит \(configuration.outputTokenLimit) токенов исчерпан до завершения JSON-справки. Последняя корректная справка и очередь событий сохранены. Увеличьте лимит токенов для следующей встречи.")
+            }
+        }
+        return result.text
     }
 
     private func receive(_ text: String, json: Bool, prefix: String) async {
         guard !cancelled else { return }
-        if json { state.draftSummary = String(ContextMemory.draftSummary(from: text).prefix(configuration.summaryCharacterLimit)) }
+        if json { state.draftSummary = ContextMemory.draftSummary(from: text) }
         else { state.protocolText = prefix + text }
         await publish()
     }

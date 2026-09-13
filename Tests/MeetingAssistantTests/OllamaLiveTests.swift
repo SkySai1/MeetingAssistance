@@ -3,6 +3,44 @@ import Synchronization
 import Testing
 @testable import MeetingAssistantCore
 
+/// Two real API calls with explicit output limits; total generation budget 35 s.
+@Test(.enabled(if: ProcessInfo.processInfo.environment["MEETING_TEST_OLLAMA_MODEL"] != nil), .timeLimit(.minutes(1)))
+func liveOllamaHonorsOutputTokenLimit() async throws {
+    let environment = ProcessInfo.processInfo.environment
+    let model = try #require(environment["MEETING_TEST_OLLAMA_MODEL"])
+    let client = try OllamaClient(server: environment["MEETING_TEST_OLLAMA_SERVER"] ?? "http://127.0.0.1:11434")
+    struct Result: Codable, Sendable { let limit: Int; let tokens: Int?; let reason: String?; let characters: Int; let text: String }
+    let began = ContinuousClock.now
+    do {
+        let results = try await withThrowingTaskGroup(of: [Result].self) { group in
+            group.addTask {
+                var results: [Result] = []
+                for limit in [512, 768] {
+                    let request = OllamaChatRequest(model: model, messages: [.init(role: "user", content: "Напиши список из 1000 разных советов по организации встреч. Для каждого пункта напиши отдельное предложение. Не сокращай список и не добавляй заключение.")], options: .init(num_ctx: 16384, num_predict: limit))
+                    let response = try await client.chat(request) { _ in }
+                    results.append(Result(limit: limit, tokens: response.evaluationCount, reason: response.doneReason, characters: response.text.count, text: response.text))
+                }
+                return results
+            }
+            group.addTask { try await Task.sleep(for: .seconds(35)); throw MeetingError("Token-limit test exceeded short generation budget") }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
+        let directory = URL(fileURLWithPath: ".build/validation/ollama-token-limit", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(results).write(to: directory.appendingPathComponent("results.json"))
+        for result in results {
+            #expect(result.tokens == result.limit)
+            #expect(result.reason == "length" && result.characters > 500)
+            print("num_predict=\(result.limit): eval_count=\(result.tokens ?? 0), done_reason=\(result.reason ?? ""), \(result.characters) characters retained")
+        }
+        try await client.unload(model: model)
+        #expect(try await !client.models().isEmpty)
+        print("Token-limit live test and unload: \(began.duration(to: .now))")
+    } catch { try? await client.unload(model: model); throw error }
+}
+
 /// Explicit opt-in; the ordinary test suite never loads a model or needs a server.
 @Test(.enabled(if: ProcessInfo.processInfo.environment["MEETING_TEST_OLLAMA_MODEL"] != nil))
 func liveOllamaRetainsEarlyDecisionAndFinalTail() async throws {
@@ -46,7 +84,7 @@ func liveOllamaRetainsEarlyDecisionAndFinalTail() async throws {
     #expect(result.releaseStatus == .unloaded)
     #expect(result.error == nil)
     #expect(result.messages.count == 1)
-    #expect(states.withLock { $0.allSatisfy { $0.briefing.summary.count <= config.summaryCharacterLimit && $0.briefing.entries.filter { $0.kind == .fact }.count <= config.factLimit } })
+    #expect(states.withLock { $0.allSatisfy { $0.briefing.entries.filter { $0.kind == .fact }.count <= config.factLimit } })
     #expect(result.briefing.entries.contains { $0.sourceIDs.contains("early") && $0.text.contains("47") })
     #expect(result.briefing.entries.contains { $0.sourceIDs.contains("late") && $0.text.lowercased().contains("резервн") })
     #expect(result.briefing.entries.contains { $0.status == "superseded" && $0.sourceIDs.contains("early") && $0.sourceIDs.contains("late") })
@@ -61,13 +99,13 @@ private actor RecordingOllama: OllamaServing {
     init(server: String) throws { client = try OllamaClient(server: server) }
     func models() async throws -> [OllamaModel] { try await client.models() }
     func unload(model: String) async throws { try await client.unload(model: model) }
-    func chat(_ request: OllamaChatRequest, onText: @escaping @Sendable (String) async -> Void) async throws -> String {
+    func chat(_ request: OllamaChatRequest, onText: @escaping @Sendable (String) async -> Void) async throws -> OllamaChatResponse {
         index += 1
         let directory = URL(fileURLWithPath: ".build/validation/ollama-context", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         try JSONEncoder().encode(request).write(to: directory.appendingPathComponent("request-\(index).json"))
         let text = try await client.chat(request, onText: onText)
-        try text.write(to: directory.appendingPathComponent("response-\(index).txt"), atomically: true, encoding: .utf8)
+        try text.text.write(to: directory.appendingPathComponent("response-\(index).txt"), atomically: true, encoding: .utf8)
         return text
     }
 }
