@@ -40,7 +40,7 @@ private actor LongAnswerOllama: OllamaServing {
         if request.format == nil { text = protocolText }
         else if invalidJSON { text = #"{"topic":"Тема","summary":"Оборван"# }
         else {
-            let entry = ContextEntry(id: "", kind: .decision, text: largeEntry ? protocolText : "Сохранить решение", sourceIDs: ["source"], status: "active", owner: "", deadline: "")
+            let entry = ContextEntry(id: "", kind: .decision, text: largeEntry ? protocolText : "Сохранить решение", sourceIDs: ["source"], status: largeEntry ? "superseded" : "active", owner: largeEntry ? "Анна" : "", deadline: largeEntry ? "четверг" : "")
             text = String(decoding: try JSONEncoder().encode(ContextDelta(topic: "Встреча", summary: summary, updates: [entry])), as: UTF8.self)
         }
         await onText(text)
@@ -95,7 +95,10 @@ private actor LongAnswerOllama: OllamaServing {
     await engine.run()
     let state = try #require(snapshots.withLock { $0.last })
     #expect(state.protocolComplete && state.protocolText.contains(client.protocolText))
-    #expect(state.protocolText.contains("[source]") && state.error == nil)
+    #expect(!state.protocolText.contains("[source]") && !state.protocolText.contains("item_1") && state.error == nil)
+    #expect(state.protocolText.contains("Ответственный: Анна") && state.protocolText.contains("Срок: четверг"))
+    #expect(state.protocolText.contains("изменено позднее"))
+    #expect(state.briefing.entries.first?.sourceIDs == ["source"])
 }
 
 @Test func legacyLengthSettingsMigrateToPreviewAndOnlyOldDefaultPromptChanges() throws {

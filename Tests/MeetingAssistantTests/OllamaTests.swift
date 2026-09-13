@@ -133,9 +133,41 @@ private actor FakeOllama: OllamaServing {
     #expect(result.briefing.entries.count == 2)
     #expect(states.withLock { $0.contains { $0.phase == .failed && $0.processedEvents == 0 && $0.briefing.entries.isEmpty } })
     #expect(await client.deliveryBeforeUnload)
-    #expect(await client.requests.allSatisfy { $0.messages.first?.content == "Тестовый промпт" })
+    #expect(await client.requests.allSatisfy { $0.messages.first?.content.hasPrefix("Тестовый промпт") == true })
+    #expect(await client.requests.filter { $0.format != nil }.allSatisfy { $0.messages.first?.content == "Тестовый промпт" })
     #expect(await client.requests.count == 3)
     #expect(result.releaseStatus == .unloaded)
+}
+
+@Test(arguments: [false, true])
+func protocolReceivesFactsWithoutInternalIDsForWholeMeetingAndSections(longMeeting: Bool) async throws {
+    var config = AIConfiguration(); config.model = UUID().uuidString
+    let client = FakeOllama(name: config.model, delivered: DeliveryFlag())
+    let states = Mutex<[AIState]>([])
+    let engine = ContextEngine(configuration: config, client: client) { state in states.withLock { $0.append(state) } }
+    let events = (0..<(longMeeting ? 20 : 2)).map { index in
+        event("utt_" + UUID().uuidString, "Факт \(index): согласован документ DOC-123. " + (longMeeting ? String(repeating: "Подготовить документ. ", count: 30) : ""))
+    }
+    for event in events { engine.journal.append(event) }
+    engine.journal.close()
+    await engine.run()
+    let state = try #require(states.withLock { $0.last })
+    #expect(state.protocolComplete && state.error == nil && state.processedEvents == events.count)
+    let requests = await client.requests.filter { $0.format == nil }
+    #expect(longMeeting ? requests.count > 1 : requests.count == 1)
+    let facts = requests.compactMap { $0.messages.last?.content }.joined(separator: "\n")
+    for event in events {
+        #expect(facts.contains(event.text))
+        #expect(!facts.contains(event.id))
+        #expect(state.briefing.entries.contains { $0.sourceIDs.contains(event.id) })
+    }
+    for key in ["\"id\"", "\"sourceIDs\"", "item_1"] { #expect(!facts.contains(key)) }
+    #expect(facts.contains("DOC-123") && facts.contains("\"status\":\"active\""))
+    for request in requests {
+        let system = try #require(request.messages.first?.content)
+        #expect(system.hasPrefix(config.systemPrompt))
+        #expect(system.contains("не выводи служебные ID") && system.contains("изложи сами факты"))
+    }
 }
 
 @Test func cancellingSlowAIIsBoundedAndReleasesModel() async throws {
@@ -153,6 +185,58 @@ private actor FakeOllama: OllamaServing {
     #expect(states.withLock { $0.last?.phase } == .cancelled)
     #expect(await client.unloaded)
     #expect(!states.withLock { $0.last?.protocolComplete ?? true })
+}
+
+/// Replays the engine's final request against Ollama. Already resident models
+/// stay resident; only a model loaded by this check is unloaded afterwards.
+@Test(.enabled(if: ProcessInfo.processInfo.environment["MEETING_TEST_OLLAMA_PROTOCOL_MODEL"] != nil), .timeLimit(.minutes(1)))
+func liveProtocolContainsFactsWithoutObjectIDs() async throws {
+    let environment = ProcessInfo.processInfo.environment
+    var config = AIConfiguration()
+    config.model = try #require(environment["MEETING_TEST_OLLAMA_PROTOCOL_MODEL"])
+    config.server = environment["MEETING_TEST_OLLAMA_SERVER"] ?? config.server
+    config.outputTokenLimit = 1200
+    let client = try OllamaClient(server: config.server)
+    let url = try OllamaClient.baseURL(config.server).appendingPathComponent("api/ps")
+    let (data, _) = try await URLSession.shared.data(for: URLRequest(url: url, timeoutInterval: 5))
+    struct Running: Decodable {
+        struct Model: Decodable { let name: String; let context_length: Int? }
+        let models: [Model]
+    }
+    let resident = try JSONDecoder().decode(Running.self, from: data).models.first { $0.name == config.model }
+    if let context = resident?.context_length, (16384...65536).contains(context) { config.contextTokens = context }
+    let fake = FakeOllama(name: config.model, delivered: DeliveryFlag())
+    let engine = ContextEngine(configuration: config, client: fake) { _ in }
+    let inputs = [
+        event("utt_" + UUID().uuidString, "Бюджет проекта — 47 миллионов рублей. Релиз планировали в пятницу."),
+        event("utt_" + UUID().uuidString, "Отменили пятницу, перенесли релиз на понедельник. Анна подготовит документ DOC-123 к четвергу.")
+    ]
+    for input in inputs { engine.journal.append(input) }
+    engine.journal.close()
+    await engine.run()
+    let request = try #require(await fake.requests.last)
+    #expect(request.format == nil)
+    do {
+        let response = try await withThrowingTaskGroup(of: OllamaChatResponse.self) { group in
+            group.addTask { try await client.chat(request) { _ in } }
+            group.addTask { try await Task.sleep(for: .seconds(35)); throw MeetingError("Protocol validation exceeded 35 seconds") }
+            defer { group.cancelAll() }
+            return try await group.next()!
+        }
+        let directory = URL(fileURLWithPath: ".build/validation/protocol-facts", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        try response.text.write(to: directory.appendingPathComponent("protocol.md"), atomically: true, encoding: .utf8)
+        #expect(!response.tokenLimitReached)
+        for fact in ["47", "понедельник", "Анна", "четверг", "DOC-123"] {
+            #expect(response.text.localizedCaseInsensitiveContains(fact))
+        }
+        for id in inputs.map(\.id) + ["item_", "sourceIDs", "[id]"] { #expect(!response.text.contains(id)) }
+        print("Protocol facts: \(response.text.count) characters, \(response.evaluationCount ?? 0) tokens, \(response.doneReason ?? "")")
+        if resident == nil { try await client.unload(model: config.model) }
+    } catch {
+        if resident == nil { try? await client.unload(model: config.model) }
+        throw error
+    }
 }
 
 @Test func modelLeaseRejectsConcurrentOwnerAndIgnoresStaleRelease() async throws {
