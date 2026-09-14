@@ -40,6 +40,7 @@ final class MeetingAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        model?.flushTranscriptDisplaySettings()
         guard let model, model.isBusy else { return .terminateNow }
         guard !terminationPending else { return .terminateLater }
         terminationPending = true

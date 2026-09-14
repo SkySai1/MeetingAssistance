@@ -135,6 +135,7 @@ enum GUIValidation {
     /// Native view snapshots and tab cycling only. Never captures/plays audio.
     private static func validateLayout(_ model: MeetingViewModel, directory: URL) async {
         var report: [String: Any] = [:]
+        let originalDisplay = model.transcriptDisplayConfiguration
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             try await Task.sleep(for: .milliseconds(500))
@@ -142,7 +143,20 @@ enum GUIValidation {
                 throw MeetingError("No visible native window")
             }
             for ai in [false, true] {
+                model.transcriptDisplayConfiguration = TranscriptDisplayConfiguration()
+                model.applyTranscriptDisplaySettings()
                 model.loadLayoutFixture(aiEnabled: ai)
+                try require(model.transcript.count == 3 && model.transcriptGroups.count == 2, "Continuation did not join its card")
+                let continuation = model.transcript[1]
+                model.focusedEventID = continuation.id
+                try require(model.focusedTranscriptGroupID == model.transcript[0].id, "Source link did not resolve to its group")
+                model.transcriptDisplayConfiguration.enabled = false
+                model.applyTranscriptDisplaySettings()
+                try require(model.transcriptGroups.count == 3 && model.focusedTranscriptGroupID == continuation.id, "Regrouping lost its source link")
+                model.transcriptDisplayConfiguration.enabled = true
+                model.applyTranscriptDisplaySettings()
+                try require(model.transcriptGroups.count == 2 && model.transcriptCopyText.contains(continuation.text), "Regrouping or copy lost the continuation")
+                report["transcript_grouping_and_source_links"] = "passed"
                 for size in [NSSize(width: 1280, height: 800), NSSize(width: 980, height: 620)] {
                     window.setContentSize(size)
                     for screen in [Screen.home, .audio, .meeting, .ai, .meeting] {
@@ -160,6 +174,11 @@ enum GUIValidation {
                                 try require(visible.width >= frame.width - 2 && visible.height >= frame.height - 2 && frame.height > 30,
                                     "Clipped \(key) at \(label): \(frame), root \(root)")
                             }
+                            guard let fragment = frames["transcript-focused-fragment"], let pane = frames["transcript"] else {
+                                throw MeetingError("Focused source fragment is not displayed")
+                            }
+                            try require(fragment.intersection(pane).height >= min(fragment.height, pane.height) - 2,
+                                "Focused source fragment is outside the transcript pane at \(label)")
                         }
                         var splitFrames: [[String: Double]] = []
                         func inspect(_ view: NSView) throws {
@@ -190,6 +209,8 @@ enum GUIValidation {
             report["result"] = "passed"
         } catch { report["result"] = "failed"; report["error"] = String(describing: error) }
         try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: directory.appendingPathComponent("report.json"))
+        model.transcriptDisplayConfiguration = originalDisplay
+        model.applyTranscriptDisplaySettings()
         model.finishLayoutFixture()
         NSApp.terminate(nil)
     }
