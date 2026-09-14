@@ -68,6 +68,16 @@ final class MeetingViewModel: ObservableObject {
     @Published private(set) var elapsed = 0.0
     @Published private(set) var metrics: [AudioSource: AudioMetrics] = [:]
     @Published private(set) var transcript: [TranscriptEvent] = []
+    @Published private(set) var transcriptRevision = 0
+    @Published var transcriptDisplayConfiguration = TranscriptDisplayConfiguration() {
+        didSet { scheduleTranscriptDisplayUpdate() }
+    }
+    @Published private(set) var transcriptDisplayError: String?
+    private var transcriptGrouping = TranscriptGrouping()
+    private let transcriptDisplayStore: TranscriptDisplaySettingsStore
+    private var transcriptDisplayTask: Task<Void, Never>?
+    var transcriptGroups: [TranscriptGroup] { transcriptGrouping.groups }
+    var focusedTranscriptGroupID: String? { focusedEventID.flatMap { transcriptGrouping.groupID(for: $0) } }
     @Published private(set) var diagnostics: [String] = []
     @Published private(set) var errorMessage: String?
     @Published private(set) var errorDetails = ""
@@ -97,9 +107,15 @@ final class MeetingViewModel: ObservableObject {
     private var stopPending = false
     private var lastActivePhase: MeetingPhase = .idle
 
-    init(preferences: UserDefaults = .standard) {
+    init(preferences: UserDefaults = .standard, transcriptDisplayStore: TranscriptDisplaySettingsStore = TranscriptDisplaySettingsStore()) {
         self.preferences = preferences
-        aiSettings = AISettingsViewModel(preferences: preferences)
+        self.transcriptDisplayStore = transcriptDisplayStore
+        aiSettings = AISettingsViewModel(preferences: preferences, store: AISettingsStore(directory: transcriptDisplayStore.directory))
+        do {
+            let displayConfiguration = try transcriptDisplayStore.load()
+            transcriptDisplayConfiguration = displayConfiguration
+            transcriptGrouping = TranscriptGrouping(configuration: displayConfiguration)
+        } catch { transcriptDisplayError = "Не удалось прочитать настройки транскрипта: \(error.localizedDescription)" }
         do { diarizationConfiguration = try DiarizationConfiguration.load() }
         catch {
             diarizationConfiguration = DiarizationConfiguration()
@@ -227,7 +243,7 @@ final class MeetingViewModel: ObservableObject {
         let diarization = diarizationConfiguration
         if !audioTest {
             diarizationStates = [:]; participantLedger = MeetingParticipantLedger(); participants = []
-            transcript = []; elapsed = 0; hasMeeting = true
+            resetTranscript(); elapsed = 0; hasMeeting = true
             aiWasEnabled = ai != nil; aiState = AIState(); focusedEventID = nil
             contextMessage = ""; contextMessageError = nil
         }
@@ -320,7 +336,7 @@ final class MeetingViewModel: ObservableObject {
             metrics[source] = metric
             if !audioTest { elapsed = max(elapsed, metric.elapsed) }
         }
-        transcript.append(contentsOf: batch.events)
+        appendTranscriptEvents(batch.events)
         diagnostics.append(contentsOf: batch.diagnostics)
         if diagnostics.count > 100 { diagnostics.removeFirst(diagnostics.count - 100) }
         // Temporary in-memory GUI transcript, until the persistence milestone.
@@ -335,6 +351,47 @@ final class MeetingViewModel: ObservableObject {
         guard isBusy else { return }
         stopPending = true
         session?.requestStop()
+    }
+
+    // Display-only intake; raw events continue reaching AI in MeetingSession.
+    func appendTranscriptEvents(_ events: [TranscriptEvent]) {
+        let accepted = events.filter { transcriptGrouping.append($0) }
+        guard !accepted.isEmpty else { return }
+        transcript.append(contentsOf: accepted)
+        transcriptRevision &+= 1
+    }
+
+    func resetTranscript() {
+        transcript = []
+        transcriptGrouping = TranscriptGrouping(configuration: transcriptGrouping.configuration)
+        focusedEventID = nil
+        transcriptRevision &+= 1
+    }
+
+    private func scheduleTranscriptDisplayUpdate() {
+        transcriptDisplayTask?.cancel()
+        transcriptDisplayTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(200)) } catch { return }
+            self?.applyTranscriptDisplaySettings()
+        }
+    }
+
+    func applyTranscriptDisplaySettings() {
+        transcriptDisplayTask?.cancel(); transcriptDisplayTask = nil
+        do {
+            try transcriptDisplayConfiguration.validate()
+            if transcriptGrouping.configuration != transcriptDisplayConfiguration {
+                transcriptGrouping = TranscriptGrouping(configuration: transcriptDisplayConfiguration)
+                for event in transcript { transcriptGrouping.append(event) }
+                transcriptRevision &+= 1
+            }
+            try transcriptDisplayStore.save(transcriptDisplayConfiguration)
+            transcriptDisplayError = nil
+        } catch { transcriptDisplayError = "Не удалось применить или сохранить настройки транскрипта: \(error.localizedDescription)" }
+    }
+
+    func flushTranscriptDisplaySettings() {
+        if transcriptDisplayTask != nil { applyTranscriptDisplaySettings() }
     }
 
     func continueWaitingForAI() { session?.continueWaitingForAnalysis() }
@@ -387,7 +444,10 @@ final class MeetingViewModel: ObservableObject {
         let first = TranscriptEvent(source: .remote, startTime: 1, endTime: 7, text: "Проверяем план релиза и сроки подготовки документа.",
             speakerSpans: [SpeakerSpan(speakerID: "REMOTE_speaker_1", startTime: 1, endTime: 7)])
         let second = TranscriptEvent(source: .you, startTime: 8, endTime: 12, text: "Подготовлю документ к следующей встрече.")
-        transcript = [first, second]
+        resetTranscript()
+        let continuation = TranscriptEvent(source: .remote, startTime: 7.2, endTime: 7.9, text: "Релиз остаётся в пятницу.",
+            speakerSpans: [SpeakerSpan(speakerID: "REMOTE_speaker_1", startTime: 7.2, endTime: 7.9)])
+        appendTranscriptEvents([first, continuation, second])
         participantLedger = MeetingParticipantLedger()
         participantLedger.record(id: "REMOTE_speaker_1", source: .remote, start: 1, end: 7)
         participantLedger.record(id: "YOU", source: .you, start: 8, end: 12)
@@ -403,9 +463,13 @@ final class MeetingViewModel: ObservableObject {
     }
 
     func copyTranscript() {
-        let text = transcript.map { "[\(Self.timestamp($0.startTime))] \($0.speakerLabel): \($0.text)" }.joined(separator: "\n")
+        flushTranscriptDisplaySettings()
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        NSPasteboard.general.setString(transcriptCopyText, forType: .string)
+    }
+
+    var transcriptCopyText: String {
+        transcriptGroups.map { "[\(Self.timestamp($0.startTime))–\(Self.timestamp($0.endTime))] \($0.speakerLabel): \($0.text)" }.joined(separator: "\n")
     }
 
     static func timestamp(_ time: Double) -> String {

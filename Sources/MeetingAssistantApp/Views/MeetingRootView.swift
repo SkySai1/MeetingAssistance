@@ -184,6 +184,26 @@ struct MeetingRootView: View {
                 Text("Whisper large-v3 · русский язык. Загрузка модели в память выполняется при старте встречи.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section("Отображение транскрипта") {
+                Toggle("Объединять последовательные реплики", isOn: $model.transcriptDisplayConfiguration.enabled)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Пауза между частями реплики: \(model.transcriptDisplayConfiguration.maximumPause, specifier: "%.1f") с")
+                    Slider(value: $model.transcriptDisplayConfiguration.maximumPause, in: 0.2...3, step: 0.1)
+                        .accessibilityLabel("Пауза между частями реплики")
+                    Text("Максимальный интервал одной карточки: \(Int(model.transcriptDisplayConfiguration.maximumDuration)) с")
+                    Slider(value: $model.transcriptDisplayConfiguration.maximumDuration, in: 5...120, step: 5)
+                        .accessibilityLabel("Максимальный интервал одной карточки")
+                }.disabled(!model.transcriptDisplayConfiguration.enabled)
+                Text("Части речи одного спикера дополняют карточку сразу после распознавания. При смене голоса, большой паузе или достижении интервала начинается новая карточка. Отдельная исходная фраза всегда сохраняется целиком.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("Настройки меняют отображение текущей встречи и сохраняются между запусками. Скорость распознавания и обработка AI от этих ползунков не зависят.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if !model.diarizationConfiguration.remoteEnabled {
+                    Text("Для объединения реплик собеседников включите разделение голосов REMOTE. Без него приложение не может отличить смену говорящего от продолжения речи.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if let error = model.transcriptDisplayError { Text(error).foregroundStyle(.orange) }
+            }
             Section("Разделение голосов · диаризация") {
                 Toggle("Различать собеседников в REMOTE", isOn: $model.diarizationConfiguration.remoteEnabled)
                 Toggle("Различать голоса у микрофона", isOn: $model.diarizationConfiguration.microphoneEnabled)
@@ -320,26 +340,54 @@ struct MeetingRootView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 18) {
-                            ForEach(model.transcript) { event in
-                                VStack(alignment: .leading, spacing: 6) {
-                                    HStack {
-                                        Text(event.speakerSpans == nil ? (event.source == .you ? "YOU · Вы" : "REMOTE · Собеседники") : event.speakerLabel)
-                                            .font(.caption.bold()).foregroundStyle(event.source == .you ? .blue : .teal)
-                                        Text(MeetingViewModel.timestamp(event.startTime)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                                    }
-                                    Text(event.text).font(.body).textSelection(.enabled)
-                                }.frame(maxWidth: .infinity, alignment: .leading).id(event.id)
+                            ForEach(model.transcriptGroups) { group in
+                                TranscriptGroupRow(group: group, focusedEventID: model.focusedEventID)
+                                    .id(group.id)
                             }
                         }.padding(24)
                     }
                     .defaultScrollAnchor(.bottom)
-                    .onChange(of: model.focusedEventID) { _, id in
-                        if let id { proxy.scrollTo(id, anchor: .center) }
+                    .onChange(of: model.focusedEventID, initial: true) { _, _ in
+                        if let id = model.focusedTranscriptGroupID { proxy.scrollTo(id, anchor: .top) }
                     }
-                    .onChange(of: model.transcript.count) { _, count in
-                        if let last = model.transcript.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                    .onChange(of: model.transcriptRevision) { _, _ in
+                        if let id = model.focusedTranscriptGroupID { proxy.scrollTo(id, anchor: .top) }
+                        else if let last = model.transcriptGroups.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                    }
+                    .safeAreaInset(edge: .bottom) {
+                        if model.focusedEventID != nil {
+                            Button("К новым репликам", systemImage: "arrow.down") {
+                                model.focusedEventID = nil
+                                if let last = model.transcriptGroups.last { proxy.scrollTo(last.id, anchor: .bottom) }
+                            }.padding(8)
+                        }
                     }
                 }
             }
+    }
+}
+
+private struct TranscriptGroupRow: View {
+    let group: TranscriptGroup
+    let focusedEventID: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(group.speakerLabel).font(.caption.bold()).foregroundStyle(group.source == .you ? .blue : .teal)
+                Text("\(MeetingViewModel.timestamp(group.startTime))–\(MeetingViewModel.timestamp(group.endTime))")
+                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            if let focused = group.events.first(where: { $0.id == focusedEventID }) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Исходный фрагмент · \(MeetingViewModel.timestamp(focused.startTime))")
+                        .font(.caption.bold())
+                    Text(focused.text).textSelection(.enabled)
+                }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.yellow.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                    .layoutProbe("transcript-focused-fragment")
+            }
+            Text(group.text).font(.body).textSelection(.enabled)
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }
