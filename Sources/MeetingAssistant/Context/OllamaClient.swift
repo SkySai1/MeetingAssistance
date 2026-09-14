@@ -32,6 +32,7 @@ struct OllamaChatRequest: Encodable, Sendable {
 /// Ollama's structured output grammar constrains identifiers and required fields;
 /// semantic checks and source validation still run before committing the response.
 indirect enum OllamaSchema: Encodable, Sendable {
+    case boolean
     case string([String]? = nil, maximum: Int? = nil)
     case object([String: OllamaSchema])
     case array(OllamaSchema, Int, minimum: Int = 0)
@@ -41,6 +42,8 @@ indirect enum OllamaSchema: Encodable, Sendable {
     func encode(to encoder: any Encoder) throws {
         var values = encoder.container(keyedBy: Keys.self)
         switch self {
+        case .boolean:
+            try values.encode("boolean", forKey: .type)
         case .string(let allowed, let maximum):
             try values.encode("string", forKey: .type)
             try values.encodeIfPresent(allowed, forKey: .enum)
@@ -61,14 +64,24 @@ indirect enum OllamaSchema: Encodable, Sendable {
     }
 
     static func context(entries: [ContextEntry], eventIDs: [String]) -> Self {
-        .object(["topic": .string(), "summary": .string(), "updates": .array(.alternatives(ContextKind.allCases.map { kind in
+        .object(["topic": .string(), "summary": .string(), "updates": contextUpdates(entries: entries, eventIDs: eventIDs, maximum: 32)])
+    }
+
+    static func contextPage(entries: [ContextEntry], eventIDs: [String], maximum: Int) -> Self {
+        .object(["hasMore": .boolean, "updates": contextUpdates(entries: entries, eventIDs: eventIDs, maximum: maximum)])
+    }
+
+    static var contextOverview: Self { .object(["topic": .string(), "summary": .string()]) }
+
+    private static func contextUpdates(entries: [ContextEntry], eventIDs: [String], maximum: Int) -> Self {
+        .array(.alternatives(ContextKind.allCases.map { kind in
             .object([
                 "id": .string([""] + entries.filter { $0.kind == kind }.map(\.id)), "kind": .string([kind.rawValue]),
                 "text": .string(), "sourceIDs": .array(.string(eventIDs), 32, minimum: 1),
                 "status": .string(["active", "resolved", "superseded"]),
                 "owner": .string(), "deadline": .string(),
             ])
-        }), 32)])
+        }), maximum)
     }
 }
 
