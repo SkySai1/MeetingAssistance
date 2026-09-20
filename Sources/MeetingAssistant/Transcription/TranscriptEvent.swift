@@ -47,8 +47,13 @@ actor TranscriptTimeline {
         self.output = output
     }
 
-    func update(source: AudioSource, events: [TranscriptEvent] = [], frontier: Double) throws {
-        guard let previous = frontiers[source], frontier >= previous else { throw MeetingError("\(source.rawValue): transcript frontier moved backwards") }
+    func update(source: AudioSource, events: [TranscriptEvent] = [], frontier: Double, operation: String = "update") throws {
+        guard let previous = frontiers[source] else { throw MeetingError("Unregistered transcript source: \(source.rawValue)") }
+        guard frontier >= previous else {
+            let detail = "\(source.rawValue): transcript frontier moved backwards; operation=\(operation), previous=\(previous), requested=\(frontier), delta=\(frontier - previous), incoming=\(events.count), pending=\(pending.count), lastEmitted=\(lastEmitted)"
+            Log.error(detail)
+            throw MeetingError(detail)
+        }
         for event in events {
             guard event.source == source, event.startTime.isFinite, event.endTime.isFinite,
                   event.startTime >= previous - 0.001, event.endTime >= event.startTime else {

@@ -41,22 +41,22 @@ import Testing
     }
 }
 
-@Test func speechEndsOnceAfterSilenceAndSilenceAloneDoesNotEmit() {
+@Test func speechEndsOnceAfterSilenceAndSilenceAloneDoesNotEmit() throws {
     var chunker = SpeechChunker(thresholdDB: -42)
-    #expect(chunker.append([Float](repeating: 0, count: 16000), start: 0).isEmpty)
-    #expect(chunker.append([Float](repeating: 0.2, count: 16000), start: 1).isEmpty)
-    let chunks = chunker.append([Float](repeating: 0, count: 16000), start: 2)
+    #expect(try chunker.append([Float](repeating: 0, count: 16000), start: 0).isEmpty)
+    #expect(try chunker.append([Float](repeating: 0.2, count: 16000), start: 1).isEmpty)
+    let chunks = try chunker.append([Float](repeating: 0, count: 16000), start: 2)
     #expect(chunks.count == 1)
     #expect(chunks.first?.isFinal == true)
     #expect(abs((chunks.first?.start ?? 0) - 0.7) < 0.001)
     #expect(chunker.finish() == nil)
 }
 
-@Test func continuousSpeechUsesBoundedOverlappingWindowsAndFlushesTail() {
+@Test func continuousSpeechUsesBoundedOverlappingWindowsAndFlushesTail() throws {
     var chunker = SpeechChunker(thresholdDB: -42)
     var chunks: [SpeechChunk] = []
     for second in 0..<35 {
-        chunks += chunker.append([Float](repeating: 0.1, count: 16000), start: Double(second))
+        chunks += try chunker.append([Float](repeating: 0.1, count: 16000), start: Double(second))
     }
     #expect(chunks.count == 3)
     #expect(chunks.allSatisfy { !$0.isFinal && $0.samples.count == 192000 })
@@ -67,13 +67,13 @@ import Testing
     #expect(tail?.samples.count == 80000)
 }
 
-@Test func longPhrasesEndAtShortPausesWithoutSplittingShortUtterances() {
+@Test func longPhrasesEndAtShortPausesWithoutSplittingShortUtterances() throws {
     var chunker = SpeechChunker(thresholdDB: -42)
-    #expect(chunker.append([Float](repeating: 0.1, count: 16000), start: 0).isEmpty)
-    #expect(chunker.append([Float](repeating: 0, count: 3200), start: 1).isEmpty)
-    #expect(chunker.append([Float](repeating: 0.1, count: 48000), start: 1.2).isEmpty)
-    #expect(chunker.append([Float](repeating: 0, count: 2880), start: 4.2).isEmpty)
-    let chunks = chunker.append([Float](repeating: 0, count: 320), start: 4.38)
+    #expect(try chunker.append([Float](repeating: 0.1, count: 16000), start: 0).isEmpty)
+    #expect(try chunker.append([Float](repeating: 0, count: 3200), start: 1).isEmpty)
+    #expect(try chunker.append([Float](repeating: 0.1, count: 48000), start: 1.2).isEmpty)
+    #expect(try chunker.append([Float](repeating: 0, count: 2880), start: 4.2).isEmpty)
+    let chunks = try chunker.append([Float](repeating: 0, count: 320), start: 4.38)
     #expect(chunks.count == 1)
     #expect(chunks.first?.isFinal == true)
     #expect(chunks.first?.start == 0)

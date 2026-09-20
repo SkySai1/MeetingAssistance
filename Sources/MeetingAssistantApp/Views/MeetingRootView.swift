@@ -333,6 +333,7 @@ struct MeetingRootView: View {
         case .loading: return prefix + "загрузка модели"
         case .ready: return prefix + "готова"
         case .running: return prefix + "различено голосов: \(state.detectedSpeakers)"
+        case .cancelled: return prefix + "отменена при остановке обработки"
         case .completed: return prefix + "завершена · голосов: \(state.detectedSpeakers)"
         case .failed: return prefix + (state.error ?? "недоступна")
         }

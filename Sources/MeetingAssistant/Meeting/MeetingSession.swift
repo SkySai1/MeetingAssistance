@@ -61,6 +61,9 @@ public final class MeetingSession: Sendable {
                         Log.debug("Device \(source.rawValue): \(device.name) [\(device.id)], \(device.sampleRate) Hz, \(device.inputChannels) channels")
                     }
                 }
+                if let ai = configuration.ai {
+                    Log.debug("AI configuration: model=\(ai.model), displayFactLimit=\(ai.factLimit), batchEventLimit=\(ai.batchEventLimit), memoryEntryLimit=\(ai.memoryEntryLimit), pendingEventLimit=\(ai.pendingEventLimit), interval=\(ai.updateInterval), contextTokens=\(ai.contextTokens), outputTokens=\(ai.outputTokenLimit)")
+                }
                 try configuration.validate()
                 if !stopRequested.load(ordering: .acquiring) {
                     let analysisTask = analysis.map { engine in Task { await engine.run() } }
@@ -68,6 +71,8 @@ public final class MeetingSession: Sendable {
                         do {
                             try await runSession()
                         } catch {
+                            Log.error("Audio/transcription stopped before AI finalization: \(error)")
+                            publishStopping()
                             analysis?.journal.close()
                             await analysisTask?.value
                             throw error
@@ -137,24 +142,30 @@ public final class MeetingSession: Sendable {
             for capture in captures {
                 let pipeline = pipelines[capture.source]
                 let diarizer = diarizers[capture.source]
-                group.addTask { try await self.captureLoop(capture, pipeline: pipeline, diarizer: diarizer, clock: clock) }
+                group.addTask {
+                    try await runMeetingWorker(source: capture.source, component: "capture") {
+                        try await self.captureLoop(capture, pipeline: pipeline, diarizer: diarizer, clock: clock)
+                    }
+                }
                 if let pipeline, let transcriber = transcribers[capture.source] {
                     group.addTask {
-                        while true {
-                            try Task.checkCancellation()
-                            if let chunk = await pipeline.next() {
-                                Log.debug("ASR \(capture.source.rawValue) window start=\(chunk.start) end=\(chunk.end) final=\(chunk.isFinal)")
-                                let began = clock.now
-                                var events = try await transcriber.transcribe(chunk)
-                                if let diarizer { events = await diarizer.annotate(events) }
-                                let elapsed = clock.now - began
-                                let lag = max(0, clock.now - chunk.end)
-                                try await pipeline.complete(events, lag: lag)
-                                Log.info(String(format: "ASR %@ | audio %.2fs | decode %.2fs | lag %.2fs | events %d",
-                                    capture.source.rawValue, chunk.end - chunk.start, elapsed, lag, events.count))
-                                if lag > 15 { Log.warning("\(capture.source.rawValue) transcription is more than 15 seconds behind capture") }
-                            } else if await pipeline.isDrained { break }
-                            else { try await Task.sleep(for: .milliseconds(50)) }
+                        try await runMeetingWorker(source: capture.source, component: "ASR") {
+                            while true {
+                                try Task.checkCancellation()
+                                if let chunk = await pipeline.next() {
+                                    Log.debug("ASR \(capture.source.rawValue) window start=\(chunk.start) end=\(chunk.end) final=\(chunk.isFinal)")
+                                    let began = clock.now
+                                    var events = try await transcriber.transcribe(chunk)
+                                    if let diarizer { events = await diarizer.annotate(events) }
+                                    let elapsed = clock.now - began
+                                    let lag = max(0, clock.now - chunk.end)
+                                    try await pipeline.complete(events, lag: lag)
+                                    Log.info(String(format: "ASR %@ | audio %.2fs | decode %.2fs | lag %.2fs | events %d",
+                                        capture.source.rawValue, chunk.end - chunk.start, elapsed, lag, events.count))
+                                    if lag > 15 { Log.warning("\(capture.source.rawValue) transcription is more than 15 seconds behind capture") }
+                                } else if await pipeline.isDrained { break }
+                                else { try await Task.sleep(for: .milliseconds(50)) }
+                            }
                         }
                     }
                 }
@@ -172,7 +183,7 @@ public final class MeetingSession: Sendable {
     }
 
     private func captureLoop(_ capture: AudioCapture, pipeline: StreamPipeline?, diarizer: SourceDiarizer?, clock: MeetingClock) async throws {
-        defer { diarizer?.inlet.close() }
+        defer { capture.stop(); diarizer?.inlet.close() }
         let resampler = try pipeline.map { _ in try AudioResampler(device: capture.device) }
         var lastReport = 0.0
         var lastMeter = 0.0
@@ -232,6 +243,19 @@ public final class MeetingSession: Sendable {
         try await pipeline?.finish()
         Log.info(String(format: "%@ capture stopped: %.2fs, maximum callback-consumer lag %.3fs", capture.source.rawValue,
                        Double(totalFrames) / capture.device.sampleRate, maxCaptureLag))
+    }
+}
+
+// Report the originating failure before the task group cancels sibling workers
+// and before potentially slow AI finalization/cleanup can obscure its timing.
+func runMeetingWorker(source: AudioSource, component: String, operation: @Sendable () async throws -> Void) async throws {
+    do { try await operation() }
+    catch is CancellationError {
+        Log.info("Worker cancelled: source=\(source.rawValue), component=\(component)")
+        throw CancellationError()
+    } catch {
+        Log.error("Worker failed: source=\(source.rawValue), component=\(component), error=\(error)")
+        throw error
     }
 }
 

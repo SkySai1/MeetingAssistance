@@ -50,6 +50,70 @@ private func earlyDelta() -> ContextDelta {
     ContextDelta(topic: "Релиз", summary: "Релиз в пятницу", updates: [recoveryEntry("early", text: "Релиз в пятницу")])
 }
 
+@Test func factDisplayLimitDoesNotRejectGroundedFactsOrLoseThemFromProtocol() async throws {
+    let facts = (1...3).map { index in
+        ContextEntry(id: "", kind: .fact, text: "Факт \(index)", sourceIDs: ["source"], status: "active", owner: "", deadline: "")
+    }
+    let client = RecoveryOllama([.delta(ContextDelta(topic: "Тема", summary: "Справка", updates: facts)), .protocolText])
+    var config = AIConfiguration(); config.model = client.name; config.factLimit = 1
+    let states = Mutex<[AIState]>([])
+    let engine = ContextEngine(configuration: config, client: client) { state in states.withLock { $0.append(state) } }
+    engine.journal.append(TranscriptEvent(id: "source", source: .remote, startTime: 0, endTime: 1, text: "Факт 1. Факт 2. Факт 3."))
+    engine.journal.close()
+    await engine.run()
+    let result = try #require(states.withLock { $0.last })
+    #expect(result.phase == .completed && result.processedEvents == 1 && result.protocolComplete)
+    #expect(result.briefing.entries.filter { $0.kind == .fact }.count == 1)
+    #expect(result.hiddenFactCount == 2)
+    let requests = await client.requests
+    #expect(requests.count == 2)
+    for fact in facts { #expect(requests.last?.messages.last?.content.contains(fact.text) == true) }
+    #expect(result.releaseStatus == .unloaded)
+}
+
+@Test func pagedFactsAlsoExceedDisplayLimitWithoutLosingMemory() async throws {
+    let facts = (1...3).map { index in
+        ContextEntry(id: "", kind: .fact, text: "Факт \(index)", sourceIDs: ["source"], status: "active", owner: "", deadline: "")
+    }
+    let client = RecoveryOllama([.cut, .page(Array(facts.prefix(2)), more: true), .page([facts[2]], more: false), .overview("Три факта"), .protocolText])
+    var config = AIConfiguration(); config.model = client.name; config.factLimit = 1; config.outputTokenLimit = 1024
+    let states = Mutex<[AIState]>([])
+    let engine = ContextEngine(configuration: config, client: client) { state in states.withLock { $0.append(state) } }
+    engine.journal.append(TranscriptEvent(id: "source", source: .remote, startTime: 0, endTime: 1, text: "Факт 1. Факт 2. Факт 3."))
+    engine.journal.close()
+    await engine.run()
+    let result = try #require(states.withLock { $0.last })
+    #expect(result.phase == .completed && result.processedEvents == 1 && result.hiddenFactCount == 2)
+    #expect(result.briefing.entries.count == 1 && result.protocolComplete && result.releaseStatus == .unloaded)
+    let requests = await client.requests
+    #expect(requests.count == 5)
+    for fact in facts { #expect(requests.last?.messages.last?.content.contains(fact.text) == true) }
+}
+
+@Test func rejectedAIResponseLogsRequestAndPayloadWithoutCommittingInvalidSources() async throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let log = MeetingDebugLog(directory: directory, reportError: { _ in })
+    log.start()
+    let delta = ContextDelta(topic: "Тема", summary: "Справка", updates: [recoveryEntry("invented", text: "Неподтверждённый пункт")])
+    let client = RecoveryOllama(Array(repeating: .delta(delta), count: 3))
+    var config = AIConfiguration(); config.model = client.name; config.systemPrompt = "PRIVATE_SYSTEM_PROMPT"
+    let states = Mutex<[AIState]>([])
+    let engine = ContextEngine(configuration: config, client: client) { state in states.withLock { $0.append(state) } }
+    engine.journal.append(TranscriptEvent(id: "source", source: .remote, startTime: 0, endTime: 1, text: "Обсуждение"))
+    engine.journal.close()
+    await Log.$file.withValue(log) { await engine.run() }
+    await log.close()
+    let state = try #require(states.withLock { $0.last })
+    #expect(state.phase == .failed && state.processedEvents == 0 && state.briefing.entries.isEmpty)
+    let text = try String(contentsOf: log.fileURL, encoding: .utf8)
+    #expect(text.contains("AI validation rejected: request=1"))
+    #expect(text.contains("AI rejected response: request=1, part=1"))
+    #expect(text.contains("invented") && text.contains("Неподтверждённый пункт"))
+    #expect(text.contains("AI batch:") && text.contains("AI delta:"))
+    #expect(!text.contains("PRIVATE_SYSTEM_PROMPT"))
+}
+
 @Test(.timeLimit(.minutes(1))) func contextRecoveryPagesRetainEarlyDecisionAndFinalTailAfterNetworkRetry() async throws {
     let client = RecoveryOllama([
         .delta(earlyDelta()), .cut, .networkFailure,
