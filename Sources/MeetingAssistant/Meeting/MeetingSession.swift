@@ -10,29 +10,57 @@ public final class MeetingSession: Sendable {
     private let stopRequested = Atomic<Bool>(false)
     private let stoppingPublished = Atomic<Bool>(false)
     private let analysis: ContextEngine?
+    private let debugLog: MeetingDebugLog?
+    public var debugLogURL: URL? { debugLog?.fileURL }
 
     public init(configuration: MeetingConfiguration, callbacks: MeetingCallbacks = MeetingCallbacks()) {
         self.configuration = configuration
         self.callbacks = callbacks
+        debugLog = configuration.debugEnabled ? MeetingDebugLog(directory: configuration.debugLogDirectory, reportError: callbacks.diagnostic) : nil
         analysis = configuration.captureOnly ? nil : configuration.ai.map { ContextEngine(configuration: $0, output: callbacks.analysis) }
     }
 
-    public func requestStop() { stopRequested.store(true, ordering: .releasing) }
-    public func cancelAnalysis() { if let analysis { Task { await analysis.cancel() } } }
-    public func retryAnalysis() { if let analysis { Task { await analysis.retry() } } }
-    public func continueWaitingForAnalysis() { if let analysis { Task { await analysis.continueWaiting() } } }
+    public func requestStop() { debugLog?.record(.info, "Stop requested"); stopRequested.store(true, ordering: .releasing) }
+    public func cancelAnalysis() { debugLog?.record(.warning, "AI cancellation requested"); if let analysis { Task { await analysis.cancel() } } }
+    public func retryAnalysis() { debugLog?.record(.info, "AI retry requested"); if let analysis { Task { await analysis.retry() } } }
+    public func continueWaitingForAnalysis() { debugLog?.record(.info, "Continue waiting for AI requested"); if let analysis { Task { await analysis.continueWaiting() } } }
     public func addContextMessage(_ text: String, time: Double) async throws {
         guard let analysis, !stopRequested.load(ordering: .acquiring) else { throw MeetingError("AI не включён или встреча уже завершается.") }
         try await analysis.addMessage(text, time: time)
+        debugLog?.record(.info, "USER_NOTE accepted at \(time)s, characters=\(text.count)")
     }
 
     public func run() async throws {
         guard !started.exchange(true, ordering: .acquiringAndReleasing) else {
             throw MeetingError("A MeetingSession can only run once; create a new session")
         }
+        if let debugLog, debugLog.start() { callbacks.diagnostic("Debug-журнал: \(debugLog.fileURL.path)") }
+        do {
+            try await Log.$file.withValue(debugLog) {
+                try await runWithDiagnostics()
+            }
+            await debugLog?.close()
+        } catch {
+            await debugLog?.close()
+            throw error
+        }
+    }
+
+    private func publishPhase(_ phase: MeetingPhase) {
+        debugLog?.record(.info, "Meeting phase: \(phase)")
+        callbacks.phase(phase)
+    }
+
+    private func runWithDiagnostics() async throws {
         try await Log.$sink.withValue(callbacks.diagnostic) {
             do {
-                callbacks.phase(.preparing)
+                publishPhase(.preparing)
+                Log.debug("Configuration: captureOnly=\(configuration.captureOnly), remoteOnly=\(configuration.remoteOnly), thresholdDB=\(configuration.thresholdDB), AI=\(configuration.ai != nil), diarization=\(configuration.diarization.model.rawValue), remoteDiarization=\(configuration.diarization.remoteEnabled), microphoneDiarization=\(configuration.diarization.microphoneEnabled)")
+                for source in configuration.sources {
+                    if let device = configuration.selected[source] {
+                        Log.debug("Device \(source.rawValue): \(device.name) [\(device.id)], \(device.sampleRate) Hz, \(device.inputChannels) channels")
+                    }
+                }
                 try configuration.validate()
                 if !stopRequested.load(ordering: .acquiring) {
                     let analysisTask = analysis.map { engine in Task { await engine.run() } }
@@ -45,13 +73,14 @@ public final class MeetingSession: Sendable {
                             throw error
                         }
                         analysis?.journal.close()
-                        if analysisTask != nil { callbacks.phase(.finishingAnalysis) }
+                        if analysisTask != nil { publishPhase(.finishingAnalysis) }
                         await analysisTask?.value
                     } onCancel: { self.cancelAnalysis() }
                 }
-                callbacks.phase(.stopped)
+                publishPhase(.stopped)
             } catch {
-                callbacks.phase(.failed(String(describing: error)))
+                Log.error("Meeting failed: \(error)")
+                publishPhase(.failed(String(describing: error)))
                 throw error
             }
         }
@@ -59,7 +88,7 @@ public final class MeetingSession: Sendable {
 
     private func publishStopping() {
         if !stoppingPublished.exchange(true, ordering: .acquiringAndReleasing) {
-            callbacks.phase(.stopping)
+            publishPhase(.stopping)
         }
     }
 
@@ -71,11 +100,12 @@ public final class MeetingSession: Sendable {
         let timeline = TranscriptTimeline(sources: sources) { [callbacks, analysis] event in
             try callbacks.transcript(event)
             analysis?.journal.append(event)
+            Log.debug("Final transcript id=\(event.id) source=\(event.source.rawValue) speaker=\(event.speakerLabel) start=\(event.startTime) end=\(event.endTime): \(event.text)")
         }
         var transcribers: [AudioSource: WhisperTranscriber] = [:]
         var pipelines: [AudioSource: StreamPipeline] = [:]
         if !configuration.captureOnly {
-            callbacks.phase(.loadingModels)
+            publishPhase(.loadingModels)
             let paths = try ModelPaths(model: configuration.modelPath, tokenizer: configuration.tokenizerPath)
             Log.info("\nLoading WhisperKit locally...\nModel: \(paths.model.path)\nTokenizer: \(paths.tokenizer.path)\nLanguage: ru")
             for source in sources {
@@ -100,7 +130,7 @@ public final class MeetingSession: Sendable {
         defer { captures.forEach { $0.stop() } }
         Log.info("\nStarting audio capture...")
         for capture in captures { try capture.start(); Log.info("\(capture.source.rawValue) stream ready") }
-        callbacks.phase(.running)
+        publishPhase(.running)
         Log.info(configuration.captureOnly ? "Capturing independent PCM." : "Transcription started.")
         try await withThrowingTaskGroup(of: Void.self) { group in
             for diarizer in diarizers.values { group.addTask { await diarizer.run() } }
@@ -113,6 +143,7 @@ public final class MeetingSession: Sendable {
                         while true {
                             try Task.checkCancellation()
                             if let chunk = await pipeline.next() {
+                                Log.debug("ASR \(capture.source.rawValue) window start=\(chunk.start) end=\(chunk.end) final=\(chunk.isFinal)")
                                 let began = clock.now
                                 var events = try await transcriber.transcribe(chunk)
                                 if let diarizer { events = await diarizer.annotate(events) }
@@ -121,7 +152,7 @@ public final class MeetingSession: Sendable {
                                 try await pipeline.complete(events, lag: lag)
                                 Log.info(String(format: "ASR %@ | audio %.2fs | decode %.2fs | lag %.2fs | events %d",
                                     capture.source.rawValue, chunk.end - chunk.start, elapsed, lag, events.count))
-                                if lag > 15 { Log.info("WARNING: \(capture.source.rawValue) transcription is more than 15 seconds behind capture") }
+                                if lag > 15 { Log.warning("\(capture.source.rawValue) transcription is more than 15 seconds behind capture") }
                             } else if await pipeline.isDrained { break }
                             else { try await Task.sleep(for: .milliseconds(50)) }
                         }

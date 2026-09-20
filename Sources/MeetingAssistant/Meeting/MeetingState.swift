@@ -46,6 +46,8 @@ public struct MeetingConfiguration: Sendable {
     public var tokenizerPath: String?
     public var thresholdDB = -42.0
     public var debugAudioDirectory: String?
+    public var debugEnabled = false
+    public var debugLogDirectory: URL = MeetingDebugLog.directory
     public var ai: AIConfiguration?
     public var diarization = DiarizationConfiguration()
 
@@ -75,5 +77,9 @@ public struct MeetingConfiguration: Sendable {
 // logging state or a dependency on stdout, the CLI, AppKit, or SwiftUI.
 enum Log {
     @TaskLocal static var sink: @Sendable (String) -> Void = { _ in }
-    static func info(_ message: String) { sink(message) }
+    @TaskLocal static var file: MeetingDebugLog?
+    static func debug(_ message: @autoclosure () -> String) { file?.record(.debug, message()) }
+    static func info(_ message: String) { file?.record(.info, message); sink(message) }
+    static func warning(_ message: String) { file?.record(.warning, message); sink("WARNING: " + message) }
+    static func error(_ message: String) { file?.record(.error, message); sink("ERROR: " + message) }
 }

@@ -65,6 +65,7 @@ actor SourceDiarizer {
 
     private func publish(finished: Bool = false) {
         snapshot.withLock { $0 = Snapshot(window: window, state: state, finished: finished) }
+        Log.debug("Diarization \(source.rawValue): phase=\(state.phase.rawValue), speakers=\(state.detectedSpeakers), finished=\(finished)")
         output(state)
     }
 
@@ -119,7 +120,7 @@ actor SourceDiarizer {
             state.phase = .failed
             state.error = (error as? MeetingError)?.description
                 ?? "Не удалось обработать голоса локальной моделью. Транскрипция продолжается; подробности доступны в диагностике."
-            Log.info("Diarization \(source.rawValue): \(error)")
+            Log.error("Diarization \(source.rawValue): \(error)")
         }
     }
 

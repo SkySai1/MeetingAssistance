@@ -32,7 +32,7 @@ actor StreamPipeline {
         guard queuedSamples <= 60 * 16000 else { throw MeetingError("\(source.rawValue): ASR backlog exceeded 60 seconds; stopping without silently dropping audio") }
         queue.append(chunk)
         if queuedSamples > 24 * 16000 && !warned {
-            Log.info("WARNING: \(source.rawValue) ASR queue exceeds 24 seconds")
+            Log.warning("\(source.rawValue) ASR queue exceeds 24 seconds")
             warned = true
         }
     }

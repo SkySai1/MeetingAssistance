@@ -26,6 +26,7 @@ actor ContextEngine {
     private var forceUpdate = false
     // Once a model needs smaller responses, keep using them for this meeting.
     private var usePagedContext = false
+    private var lastLogStatus = ""
 
     init(configuration: AIConfiguration, client: (any OllamaServing)? = nil,
          output: @escaping @Sendable (AIState) async -> Void) {
@@ -447,6 +448,8 @@ actor ContextEngine {
             options: .init(num_ctx: configuration.contextTokens, num_predict: configuration.outputTokenLimit, temperature: configuration.temperature))
         responseWarningAt = .now.advanced(by: .seconds(configuration.responseWarningSeconds))
         if !json && state.protocolTruncated != true { state.generationNotice = nil }
+        let began = ContinuousClock.now
+        Log.debug("AI request: model=\(configuration.model), json=\(json), promptBytes=\(prompt.utf8.count + systemPrompt.utf8.count), contextTokens=\(configuration.contextTokens), outputTokens=\(configuration.outputTokenLimit)")
         let task = Task {
             try await client.chat(request) { [weak self] text in
                 await self?.receive(text, json: json, prefix: prefix)
@@ -454,7 +457,10 @@ actor ContextEngine {
         }
         activeRequest = task
         defer { activeRequest = nil; responseWarningAt = nil; state.waitWarning = nil }
-        let result = try await task.value
+        let result: OllamaChatResponse
+        do { result = try await task.value }
+        catch { Log.warning("AI request failed after \(began.duration(to: .now)): \(error)"); throw error }
+        Log.debug("AI response: duration=\(began.duration(to: .now)), bytes=\(result.text.utf8.count), tokenLimitReached=\(result.tokenLimitReached)")
         try checkCancelled()
         if result.tokenLimitReached {
             if !json {
@@ -475,7 +481,16 @@ actor ContextEngine {
     }
 
     private func checkCancelled() throws { if cancelled { throw CancellationError() } }
-    private func publish() async { await output(state) }
+    private func publish() async {
+        let status = "AI phase=\(state.phase.rawValue), processed=\(state.processedEvents)/\(state.totalEvents), updates=\(state.updates), model=\(state.releaseStatus.rawValue), protocolComplete=\(state.protocolComplete), error=\(state.error ?? "none"), warning=\(state.waitWarning ?? "none"), notice=\(state.generationNotice ?? "none")"
+        if status != lastLogStatus {
+            if state.phase == .failed { Log.error(status) }
+            else if state.error != nil || state.waitWarning != nil || state.releaseStatus == .unconfirmed { Log.warning(status) }
+            else { Log.info(status) }
+            lastLogStatus = status
+        }
+        await output(state)
+    }
 }
 
 private struct ContextRecoveryPage: Decodable {

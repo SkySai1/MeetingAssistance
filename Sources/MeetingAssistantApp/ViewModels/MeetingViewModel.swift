@@ -78,6 +78,10 @@ final class MeetingViewModel: ObservableObject {
     private var transcriptDisplayTask: Task<Void, Never>?
     var transcriptGroups: [TranscriptGroup] { transcriptGrouping.groups }
     var focusedTranscriptGroupID: String? { focusedEventID.flatMap { transcriptGrouping.groupID(for: $0) } }
+    @Published var debugEnabled = false {
+        didSet { preferences.set(debugEnabled, forKey: "debugEnabled") }
+    }
+    @Published private(set) var debugLogPath: String?
     @Published private(set) var diagnostics: [String] = []
     @Published private(set) var errorMessage: String?
     @Published private(set) var errorDetails = ""
@@ -109,6 +113,7 @@ final class MeetingViewModel: ObservableObject {
 
     init(preferences: UserDefaults = .standard, transcriptDisplayStore: TranscriptDisplaySettingsStore = TranscriptDisplaySettingsStore()) {
         self.preferences = preferences
+        debugEnabled = preferences.bool(forKey: "debugEnabled")
         self.transcriptDisplayStore = transcriptDisplayStore
         aiSettings = AISettingsViewModel(preferences: preferences, store: AISettingsStore(directory: transcriptDisplayStore.directory))
         do {
@@ -238,7 +243,7 @@ final class MeetingViewModel: ObservableObject {
         guard !isBusy, inputsReady, audioTest || (modelReady && !isDownloadingSpeechModel && !isPreparingDiarization) else { return }
         isBusy = true; isAudioTest = audioTest; stopPending = false
         phase = .preparing; lastActivePhase = .preparing; errorMessage = nil; errorDetails = ""
-        metrics = [:]; diagnostics = []
+        metrics = [:]; diagnostics = []; debugLogPath = nil
         let ai = !audioTest && aiSettings.enabled ? aiSettings.configuration : nil
         let diarization = diarizationConfiguration
         if !audioTest {
@@ -278,6 +283,7 @@ final class MeetingViewModel: ObservableObject {
             }
             var configuration = MeetingConfiguration(selected: selected)
             configuration.captureOnly = audioTest
+            configuration.debugEnabled = debugEnabled
             configuration.modelPath = modelPath.isEmpty ? nil : modelPath
             configuration.tokenizerPath = tokenizerPath.isEmpty ? nil : tokenizerPath
             configuration.ai = ai
@@ -287,6 +293,7 @@ final class MeetingViewModel: ObservableObject {
             callbacks.analysis = { [weak self] state in await self?.receiveAnalysis(state) }
             let session = MeetingSession(configuration: configuration, callbacks: callbacks)
             self.session = session
+            debugLogPath = session.debugLogURL?.path
             let pump = Task {
                 while !Task.isCancelled {
                     apply(mailbox.drain(), audioTest: audioTest)
