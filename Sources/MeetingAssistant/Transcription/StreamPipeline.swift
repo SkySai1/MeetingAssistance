@@ -23,16 +23,17 @@ actor StreamPipeline {
     }
 
     func ingest(_ samples: [Float], start: Double) async throws {
-        for chunk in chunker.append(samples, start: start) { try enqueue(chunk) }
-        try await timeline.update(source: source, frontier: frontier)
+        for chunk in try chunker.append(samples, start: start) { try enqueue(chunk) }
+        try await publish(operation: "ingest")
     }
 
     private func enqueue(_ chunk: SpeechChunk) throws {
         queuedSamples += chunk.samples.count
         guard queuedSamples <= 60 * 16000 else { throw MeetingError("\(source.rawValue): ASR backlog exceeded 60 seconds; stopping without silently dropping audio") }
         queue.append(chunk)
+        Log.debug("ASR queue \(source.rawValue): enqueued start=\(chunk.start), end=\(chunk.end), final=\(chunk.isFinal), queuedSamples=\(queuedSamples), windows=\(queue.count)")
         if queuedSamples > 24 * 16000 && !warned {
-            Log.info("WARNING: \(source.rawValue) ASR queue exceeds 24 seconds")
+            Log.warning("\(source.rawValue) ASR queue exceeds 24 seconds")
             warned = true
         }
     }
@@ -52,13 +53,23 @@ actor StreamPipeline {
         // The finalizer never emits before its last confirmed end, even if the
         // next window retains older context. Do not delay output for that overlap.
         confirmedThrough = max(confirmedThrough, events.last?.endTime ?? 0)
-        try await timeline.update(source: source, events: events, frontier: frontier)
+        try await publish(events: events, operation: "complete")
     }
 
     func finish() async throws {
         if let tail = chunker.finish() { try enqueue(tail) }
         finished = true
-        try await timeline.update(source: source, frontier: frontier)
+        try await publish(operation: "finish")
+    }
+
+    private func publish(events: [TranscriptEvent] = [], operation: String) async throws {
+        let value = frontier
+        let diagnostic = Log.file == nil ? "" : "confirmedThrough=\(confirmedThrough), inFlightStart=\(inFlight?.start ?? .infinity), queuedStart=\(queue.first?.start ?? .infinity), queuedSamples=\(queuedSamples), finished=\(finished); \(chunker.diagnosticState)"
+        do { try await timeline.update(source: source, events: events, frontier: value, operation: operation) }
+        catch {
+            Log.error("ASR pipeline \(source.rawValue): operation=\(operation), frontier=\(value), \(diagnostic); error=\(error)")
+            throw error
+        }
     }
 
     var isDrained: Bool { finished && queue.isEmpty && inFlight == nil }

@@ -72,7 +72,7 @@ public struct SpeakerSpan: Codable, Sendable, Equatable {
 }
 
 public struct DiarizationState: Sendable, Equatable {
-    public enum Phase: String, Sendable { case loading, ready, running, completed, failed }
+    public enum Phase: String, Sendable { case loading, ready, running, completed, cancelled, failed }
     public let source: AudioSource
     public var phase: Phase
     public var processedThrough = 0.0

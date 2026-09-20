@@ -69,7 +69,7 @@ The next milestone, reordered by the user on 2026-09-12, is:
 
 > Configurable Ollama server and model selection, an editable system prompt, streaming meeting context that retains earlier events, a final meeting protocol displayed for copying, and API-driven model unloading after delivery.
 
-Implement this as Phase 8 before diarization, voice profiles, and SQLite. See [OLLAMA_PLAN.md](OLLAMA_PLAN.md) for the implementation sequence and acceptance criteria. This is planned work, not functionality already present in the baseline.
+Implement this as Phase 8 before diarization, voice profiles, and SQLite. See the Phase 8 section below for the implementation sequence and acceptance criteria. This is planned work, not functionality already present in the baseline.
 
 The two sources are:
 
@@ -636,7 +636,7 @@ Fetch the available model list from the configured server automatically and let 
 
 Provide an editable system prompt with a default and reset action. Store AI settings in `~/.meetingassistant/settings.json` and the prompt in `~/.meetingassistant/system-prompt.txt`; reload them on app startup. Keep summary short without appending meeting history. Let the user configure summary character and fact-count limits, collapse fact/question lists, and submit labelled USER_NOTE messages to guide context during a meeting. Notes are not ASR utterances. Use it for both live context and the final protocol. Freeze server, model, and prompt for each meeting; changes apply to the next meeting.
 
-Use verified public APIs: `GET /api/tags`, streaming `POST /api/chat`, `POST /api/generate` with `keep_alive: 0` to unload, and `GET /api/ps` to verify. API references and edge cases are documented in [OLLAMA_PLAN.md](OLLAMA_PLAN.md).
+Use verified public APIs: `GET /api/tags`, streaming `POST /api/chat`, `POST /api/generate` with `keep_alive: 0` to unload, and `GET /api/ps` to verify.
 
 The application must remain useful when Ollama is unavailable.
 
@@ -1276,7 +1276,7 @@ Acceptance criteria:
 
 ## Phase 8 — Ollama context, final protocol, and model lifecycle
 
-This is the next milestone after the accepted basic GUI. Detailed plan: [OLLAMA_PLAN.md](OLLAMA_PLAN.md).
+This is the next milestone after the accepted basic GUI. The implementation sequence and acceptance criteria follow below.
 
 Implement incrementally within this milestone:
 

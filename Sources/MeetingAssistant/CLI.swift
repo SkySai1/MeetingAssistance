@@ -13,6 +13,7 @@ struct Options: Sendable {
     var thresholdDB = -42.0
     var json = false
     var debugAudioDirectory: String?
+    var debugEnabled = false
     var ai = AIConfiguration()
     var aiEnabled = false
     var aiOutput: String?
@@ -45,6 +46,7 @@ struct Options: Sendable {
             case "--model-path": modelPath = try value()
             case "--tokenizer-path": tokenizerPath = try value()
             case "--json": json = true
+            case "--debug": debugEnabled = true
             case "--debug-audio-dir": debugAudioDirectory = try value()
             case "--ollama-server": ai.server = try value()
             case "--ollama-model": ai.model = try value(); aiEnabled = true
@@ -84,6 +86,7 @@ struct Options: Sendable {
       --tokenizer-path PATH     Folder containing local tokenizer JSON files
       --speech-threshold DB     Speech gate in dBFS (default: -42)
       --json                    Emit finalized events as JSON Lines on stdout
+      --debug                   Save detailed meeting events to ~/.meetingassistant/logs
       --debug-audio-dir PATH     Explicitly save ASR input WAVs and raw result JSON locally
       --ollama-server URL        AI server (default: http://127.0.0.1:11434)
       --ollama-model NAME        Enable AI with this explicitly selected model
@@ -113,6 +116,7 @@ extension Options {
         configuration.tokenizerPath = tokenizerPath
         configuration.thresholdDB = thresholdDB
         configuration.debugAudioDirectory = debugAudioDirectory
+        configuration.debugEnabled = debugEnabled
         configuration.ai = aiEnabled ? ai : nil
         configuration.diarization = diarization
         return configuration

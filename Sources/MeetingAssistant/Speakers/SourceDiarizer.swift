@@ -53,6 +53,9 @@ actor SourceDiarizer {
         var finished = false
     }
     private nonisolated let snapshot: Mutex<Snapshot>
+    private var lastLogPhase: DiarizationState.Phase?
+    private var lastLogSpeakers = -1
+    private var lastLogAt = ContinuousClock.now
 
     init(source: AudioSource, model: DiarizationModel = .lsEENDDIHARD3, modelURL: URL? = nil, output: @escaping @Sendable (DiarizationState) -> Void) {
         self.source = source; self.modelURL = modelURL ?? DiarizationModels.modelURL(for: model); self.output = output
@@ -65,6 +68,10 @@ actor SourceDiarizer {
 
     private func publish(finished: Bool = false) {
         snapshot.withLock { $0 = Snapshot(window: window, state: state, finished: finished) }
+        if finished || lastLogPhase != state.phase || lastLogSpeakers != state.detectedSpeakers || lastLogAt.duration(to: .now) >= .seconds(5) {
+            Log.debug("Diarization \(source.rawValue): phase=\(state.phase.rawValue), speakers=\(state.detectedSpeakers), processedThrough=\(state.processedThrough), voiceMemoryFrames=\(state.voiceMemoryFrames ?? 0), finished=\(finished), error=\(state.error ?? "none")")
+            lastLogPhase = state.phase; lastLogSpeakers = state.detectedSpeakers; lastLogAt = .now
+        }
         output(state)
     }
 
@@ -72,6 +79,7 @@ actor SourceDiarizer {
         publish()
         defer { inlet.abandon(); publish(finished: true) }
         do {
+            try Task.checkCancellation()
             guard FileManager.default.fileExists(atPath: modelURL.path) else { throw MeetingError("Подготовьте модель диаризации в настройках аудио.") }
             let diarizer = try DiarizationModels.makeDiarizer(modelSelection, at: modelURL)
             defer { diarizer.cleanup() }
@@ -114,12 +122,16 @@ actor SourceDiarizer {
                     return
                 } else { try await Task.sleep(for: .milliseconds(10)) }
             }
-            state.phase = .completed
+            state.phase = .cancelled
+            Log.info("Diarization \(source.rawValue) cancelled with meeting workers")
+        } catch is CancellationError {
+            state.phase = .cancelled
+            Log.info("Diarization \(source.rawValue) cancelled with meeting workers")
         } catch {
             state.phase = .failed
             state.error = (error as? MeetingError)?.description
                 ?? "Не удалось обработать голоса локальной моделью. Транскрипция продолжается; подробности доступны в диагностике."
-            Log.info("Diarization \(source.rawValue): \(error)")
+            Log.error("Diarization \(source.rawValue): \(error)")
         }
     }
 

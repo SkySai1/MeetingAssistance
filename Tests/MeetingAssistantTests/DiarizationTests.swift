@@ -2,6 +2,20 @@ import Foundation
 import Synchronization
 import Testing
 @testable import MeetingAssistantCore
+
+@Test func cancelledDiarizationDoesNotReportModelFailure() async throws {
+    let states = Mutex<[DiarizationState]>([])
+    let diarizer = SourceDiarizer(source: .you, modelURL: URL(fileURLWithPath: "/missing-model")) { state in
+        states.withLock { $0.append(state) }
+    }
+    let task = Task {
+        withUnsafeCurrentTask { $0?.cancel() }
+        await diarizer.run()
+    }
+    await task.value
+    let last = try #require(states.withLock { $0.last })
+    #expect(last.phase == .cancelled && last.error == nil)
+}
 @testable import MeetingAssistant
 @testable import MeetingAssistantApp
 

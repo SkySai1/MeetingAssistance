@@ -26,6 +26,10 @@ actor ContextEngine {
     private var forceUpdate = false
     // Once a model needs smaller responses, keep using them for this meeting.
     private var usePagedContext = false
+    private var lastLogStatus = ""
+    private var requestSequence = 0
+    private var lastResponse: (request: Int, text: String, truncated: Bool)?
+    private var lastRejectedRequest: Int?
 
     init(configuration: AIConfiguration, client: (any OllamaServing)? = nil,
          output: @escaping @Sendable (AIState) async -> Void) {
@@ -226,7 +230,7 @@ actor ContextEngine {
             recent.insert(event, at: 0)
         }
         let recentJSON = String(decoding: try encoder.encode(recent), as: UTF8.self)
-        let prefix = instruction + "\nSummary: 2–3 коротких предложения. Переписывай его, не дополняй историю. Не более \(configuration.factLimit) новых фактов; выделяй главное. USER_NOTE — контекстное сообщение пользователя, а не произнесённая реплика. Используй его для уточнения темы и акцентов.\nВ updates sourceIDs указывай только из НОВЫХ событий. Прежние ссылки приложение сохраняет само. Не возвращай старые пункты без изменения.\n"
+        let prefix = instruction + "\nSummary: 2–3 коротких предложения. Переписывай его, не дополняй историю. Сохраняй все значимые факты. Приложение показывает до \(configuration.factLimit) фактов в окне, остальные сохраняет для протокола; это не предел извлечения фактов. USER_NOTE — контекстное сообщение пользователя, а не произнесённая реплика. Используй его для уточнения темы и акцентов.\nВ updates sourceIDs указывай только из НОВЫХ событий. Прежние ссылки приложение сохраняет само. Не возвращай старые пункты без изменения.\n"
             + (progress.isEmpty ? responseInstruction : "") + "\nСОХРАНЁННОЕ СОСТОЯНИЕ (выборка полного журнала):\n"
         let suffix = "\nПРЕДЫДУЩИЕ ФРАЗЫ (уже обработаны, для связности):\n" + recentJSON + "\nНОВЫЕ СОБЫТИЯ:\n" + eventJSON
             + (progress.isEmpty ? "" : "\nЗАДАНИЕ ДЛЯ ТЕКУЩЕЙ ЧАСТИ:\n" + responseInstruction + progress)
@@ -237,11 +241,13 @@ actor ContextEngine {
     }
 
     private func update(_ events: [ContextInputEvent], knownIDs: Set<String>) async throws {
+        lastResponse = nil
         state.phase = .updating
         state.error = nil
         state.draftSummary = ""
         state.generationNotice = nil
         await publish()
+        Log.debug("AI batch: processed=\(state.processedEvents), events=\(events.map(\.id)), memoryItems=\(memory.briefing.entries.count), paged=\(usePagedContext)")
         var candidate = memory
         if !usePagedContext {
             do {
@@ -249,11 +255,10 @@ actor ContextEngine {
                     responseInstruction: "Обнови справку. Верни только JSON с ключами topic (строка), summary (краткая строка), updates (массив).")
                 let text = try await generate(prompt, json: true, schema: .context(entries: memory.briefing.entries, eventIDs: events.map(\.id)))
                 let delta = try JSONDecoder().decode(ContextDelta.self, from: Data(text.utf8))
-                guard delta.updates.filter({ $0.kind == .fact }).count <= configuration.factLimit else {
-                    throw MeetingError("Модель превысила заданное число фактов. Предыдущая справка сохранена.")
-                }
+                Log.debug("AI delta: events=\(events.map(\.id)), updates=\(delta.updates.count), facts=\(delta.updates.filter { $0.kind == .fact }.count), displayFactLimit=\(configuration.factLimit), memoryBefore=\(memory.briefing.entries.count), memoryLimit=\(configuration.memoryEntryLimit)")
                 try candidate.apply(delta, newEvents: events, knownIDs: knownIDs, entryLimit: configuration.memoryEntryLimit)
             } catch {
+                logRejectedResponse(error)
                 if error is ContextTokenLimit || error is DecodingError { usePagedContext = true }
                 else { throw error }
             }
@@ -274,14 +279,13 @@ actor ContextEngine {
         state.draftSummary = ""
         state.error = nil
         state.generationNotice = nil
-        Log.info("AI context updated: \(state.processedEvents)/\(state.totalEvents) events, \(state.briefing.entries.count) items")
+        Log.info("AI context updated: \(state.processedEvents)/\(state.totalEvents) events, visibleItems=\(state.briefing.entries.count), hiddenFacts=\(state.hiddenFactCount), memoryItems=\(memory.briefing.entries.count)")
         await publish()
     }
 
     private func recoverContext(_ events: [ContextInputEvent], knownIDs: Set<String>) async throws -> ContextMemory {
         var staged = memory
         var updateCount = 0
-        var factCount = 0
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         // Reserve roughly 256 tokens per grounded item. This limits a response,
@@ -295,7 +299,7 @@ actor ContextEngine {
                 let maximum = attempt == 1 ? pageSize : 1
                 let instruction = """
                 Полная справка не поместилась в \(configuration.outputTokenLimit) токенов. Это часть \(pageNumber). Сейчас верни ТОЛЬКО JSON с ключами updates (массив максимум из \(maximum) пунктов) и hasMore (boolean). Не возвращай topic или summary на этом шаге.
-                Извлеки следующие ещё не обработанные изменения из НОВЫХ событий. Пиши кратко, без пояснений и повторов, сохраняя факты, ответственных, сроки и отмены решений. Не теряй остальные сведения: если есть ещё изменения, поставь hasMore=true — они будут запрошены следующей частью. hasMore=false допустим только когда все значимые изменения этого пакета обработаны. Уже обработанные пункты перечислены ниже; не возвращай их повторно. Осталось допустимых новых фактов в этом пакете: \(configuration.factLimit - factCount).
+                Извлеки следующие ещё не обработанные изменения из НОВЫХ событий. Пиши кратко, без пояснений и повторов, сохраняя факты, ответственных, сроки и отмены решений. Не теряй остальные сведения: если есть ещё изменения, поставь hasMore=true — они будут запрошены следующей частью. hasMore=false допустим только когда все значимые изменения этого пакета обработаны. Уже обработанные пункты перечислены ниже; не возвращай их повторно. Лимит фактов на экране не ограничивает число сохраняемых фактов.
                 Попытка \(attempt) из 3. Экономь токены на формулировках, заверши все поля и JSON.
                 \(previousFailure.map { "Предыдущий ответ отклонён: \($0) Исправь эту ошибку." } ?? "")
                 """
@@ -303,9 +307,9 @@ actor ContextEngine {
                 let text = try await self.generate(prompt, json: true,
                     schema: .contextPage(entries: before.briefing.entries, eventIDs: events.map(\.id), maximum: maximum))
                 let page = try JSONDecoder().decode(ContextRecoveryPage.self, from: Data(text.utf8))
+                Log.debug("AI page: number=\(pageNumber), attempt=\(attempt), updates=\(page.updates.count), facts=\(page.updates.filter { $0.kind == .fact }.count), hasMore=\(page.hasMore), maximum=\(maximum), priorUpdates=\(updateCount)")
                 guard page.updates.count <= maximum, !page.hasMore || !page.updates.isEmpty,
-                      updateCount + page.updates.count <= 32,
-                      factCount + page.updates.filter({ $0.kind == .fact }).count <= self.configuration.factLimit else {
+                      updateCount + page.updates.count <= 32 else {
                     throw MeetingError("Некорректная часть справки: превышен размер обновления или отсутствует продвижение.")
                 }
                 var candidate = before
@@ -318,7 +322,6 @@ actor ContextEngine {
             }
             staged = candidate
             updateCount += page.updates.count
-            factCount += page.updates.filter { $0.kind == .fact }.count
             let changes = staged.briefing.entries.filter { entry in !memory.briefing.entries.contains(entry) }
             progress = "\nУЖЕ ОБРАБОТАНО В ЭТОМ ПАКЕТЕ (не повторять):\n" + String(decoding: try encoder.encode(changes), as: UTF8.self) + "\n"
             if !page.hasMore { break }
@@ -354,10 +357,12 @@ actor ContextEngine {
             state.draftSummary = ""
             state.generationNotice = "Получаем справку частями: \(label). Попытка \(attempt) из 3; лимит ответа \(configuration.outputTokenLimit) токенов."
             await publish()
+            lastResponse = nil
             do { return try await operation(attempt, previousFailure) }
             catch {
                 try checkCancelled()
                 if error is CancellationError { throw error }
+                logRejectedResponse(error)
                 let reason = error is DecodingError ? "Ollama вернула некорректный JSON." : String(describing: error)
                 previousFailure = reason
                 guard attempt < 3 else { throw ContextRecoveryExhausted("Не удалось получить \(label) после 3 попыток. \(reason)") }
@@ -447,6 +452,11 @@ actor ContextEngine {
             options: .init(num_ctx: configuration.contextTokens, num_predict: configuration.outputTokenLimit, temperature: configuration.temperature))
         responseWarningAt = .now.advanced(by: .seconds(configuration.responseWarningSeconds))
         if !json && state.protocolTruncated != true { state.generationNotice = nil }
+        let began = ContinuousClock.now
+        requestSequence += 1
+        let requestID = requestSequence
+        lastResponse = nil
+        Log.debug("AI request: id=\(requestID), model=\(configuration.model), json=\(json), promptBytes=\(prompt.utf8.count + systemPrompt.utf8.count), contextTokens=\(configuration.contextTokens), outputTokens=\(configuration.outputTokenLimit)")
         let task = Task {
             try await client.chat(request) { [weak self] text in
                 await self?.receive(text, json: json, prefix: prefix)
@@ -454,7 +464,13 @@ actor ContextEngine {
         }
         activeRequest = task
         defer { activeRequest = nil; responseWarningAt = nil; state.waitWarning = nil }
-        let result = try await task.value
+        let result: OllamaChatResponse
+        do { result = try await task.value }
+        catch { Log.warning("AI request id=\(requestID) failed after \(began.duration(to: .now)): \(error)"); throw error }
+        Log.debug("AI response: id=\(requestID), duration=\(began.duration(to: .now)), bytes=\(result.text.utf8.count), doneReason=\(result.doneReason ?? "none"), evalCount=\(result.evaluationCount ?? 0), tokenLimitReached=\(result.tokenLimitReached)")
+        if Log.file != nil {
+            lastResponse = (requestID, String(result.text.prefix(24_000)), result.text.count > 24_000)
+        }
         try checkCancelled()
         if result.tokenLimitReached {
             if !json {
@@ -474,8 +490,33 @@ actor ContextEngine {
         await publish()
     }
 
+    private func logRejectedResponse(_ error: any Error) {
+        guard let response = lastResponse, response.request != lastRejectedRequest else { return }
+        Log.warning("AI validation rejected: request=\(response.request), error=\(String(reflecting: error))")
+        lastRejectedRequest = response.request
+        // Bounded diagnostic payload; successful answers and prompts are not
+        // dumped. Split records below the file logger's individual line limit.
+        var remaining = response.text[...]
+        var part = 1
+        while !remaining.isEmpty {
+            let piece = remaining.prefix(4000)
+            Log.debug("AI rejected response: request=\(response.request), part=\(part), truncated=\(response.truncated), text=\(piece)")
+            remaining = remaining.dropFirst(piece.count)
+            part += 1
+        }
+    }
+
     private func checkCancelled() throws { if cancelled { throw CancellationError() } }
-    private func publish() async { await output(state) }
+    private func publish() async {
+        let status = "AI phase=\(state.phase.rawValue), processed=\(state.processedEvents)/\(state.totalEvents), updates=\(state.updates), model=\(state.releaseStatus.rawValue), protocolComplete=\(state.protocolComplete), error=\(state.error ?? "none"), warning=\(state.waitWarning ?? "none"), notice=\(state.generationNotice ?? "none")"
+        if status != lastLogStatus {
+            if state.phase == .failed { Log.error(status) }
+            else if state.error != nil || state.waitWarning != nil || state.releaseStatus == .unconfirmed { Log.warning(status) }
+            else { Log.info(status) }
+            lastLogStatus = status
+        }
+        await output(state)
+    }
 }
 
 private struct ContextRecoveryPage: Decodable {

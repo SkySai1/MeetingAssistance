@@ -11,6 +11,29 @@ private func testConfiguration() -> MeetingConfiguration {
     ])
 }
 
+@Test func workerLogsOriginalFailureBeforeCancellingSibling() async throws {
+    let messages = Mutex<[String]>([])
+    await Log.$sink.withValue({ message in messages.withLock { $0.append(message) } }) {
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                group.addTask {
+                    try await runMeetingWorker(source: .you, component: "capture") { throw MeetingError("primary failure") }
+                }
+                group.addTask {
+                    try await runMeetingWorker(source: .remote, component: "ASR") { try await Task.sleep(for: .seconds(10)) }
+                }
+                for try await _ in group { }
+            }
+            Issue.record("Expected originating worker error")
+        } catch { #expect(String(describing: error) == "primary failure") }
+    }
+    let records = messages.withLock { $0 }
+    let error = try #require(records.firstIndex { $0.contains("ERROR: Worker failed: source=YOU") })
+    let cancellation = try #require(records.firstIndex { $0.contains("Worker cancelled: source=REMOTE") })
+    #expect(error < cancellation)
+    #expect(records.filter { $0.contains("ERROR:") }.count == 1)
+}
+
 @Test func stopBeforeRunDoesNotLoadModelsOrOpenDevicesAndSessionCannotRunTwice() async throws {
     let phases = Mutex<[MeetingPhase]>([])
     let events = Mutex<[TranscriptEvent]>([])

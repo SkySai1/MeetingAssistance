@@ -184,6 +184,15 @@ struct MeetingRootView: View {
                 Text("Whisper large-v3 · русский язык. Загрузка модели в память выполняется при старте встречи.")
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section("Диагностика") {
+                Toggle("Debug-режим · подробный журнал встречи", isOn: $model.debugEnabled)
+                    .disabled(model.isBusy)
+                Text("Для каждой встречи и проверки звука создаётся отдельный файл в ~/.meetingassistant/logs. Журнал содержит события обработки, подтверждённый текст и ошибки с уровнями DEBUG, INFO, WARNING, ERROR. Аудио не записывается.")
+                    .font(.caption).foregroundStyle(.secondary)
+                if let path = model.debugLogPath {
+                    Text(path).font(.caption.monospaced()).textSelection(.enabled)
+                }
+            }
             Section("Отображение транскрипта") {
                 Toggle("Объединять последовательные реплики", isOn: $model.transcriptDisplayConfiguration.enabled)
                 VStack(alignment: .leading, spacing: 5) {
@@ -324,6 +333,7 @@ struct MeetingRootView: View {
         case .loading: return prefix + "загрузка модели"
         case .ready: return prefix + "готова"
         case .running: return prefix + "различено голосов: \(state.detectedSpeakers)"
+        case .cancelled: return prefix + "отменена при остановке обработки"
         case .completed: return prefix + "завершена · голосов: \(state.detectedSpeakers)"
         case .failed: return prefix + (state.error ?? "недоступна")
         }
